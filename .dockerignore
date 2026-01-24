@@ -1,0 +1,70 @@
+# =============================================================================
+# Docker Ignore File
+# =============================================================================
+# Files and directories to exclude from Docker build context
+# =============================================================================
+
+# Git
+.git
+.gitignore
+
+# Node.js
+node_modules
+npm-debug.log*
+
+# TypeScript build output (we build in Docker)
+dist
+
+# Python virtual environments
+python-sidecar/venv
+python-sidecar/.venv
+python-sidecar/__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Data files (will be mounted as volume)
+data
+*.db
+*.db-wal
+*.db-shm
+*.index
+id_map.json
+
+# IDE and editor files
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Documentation (not needed in image)
+*.md
+!README.md
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Environment files (use Docker env vars instead)
+.env
+.env.*
+!.env.example
+
+# Test files
+test
+tests
+*.test.ts
+*.spec.ts
+coverage
+
+# Logs
+logs
+*.log
+
+# Misc
+.editorconfig
+.eslintrc*
+.prettierrc*
+LICENSE

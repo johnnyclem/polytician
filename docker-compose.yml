@@ -1,0 +1,64 @@
+# =============================================================================
+# Politician MCP Server - Docker Compose Configuration
+# =============================================================================
+# Usage:
+#   docker-compose up -d      # Start in background
+#   docker-compose logs -f    # View logs
+#   docker-compose down       # Stop and remove
+#   docker-compose down -v    # Stop and remove with volumes
+# =============================================================================
+
+version: '3.8'
+
+services:
+  politician:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: politician-mcp
+    restart: unless-stopped
+    
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      - SIDECAR_HOST=127.0.0.1
+      - SIDECAR_PORT=8787
+      - DB_PATH=/app/data/concepts.db
+      - LOG_LEVEL=info
+    
+    # Persistent storage
+    volumes:
+      - politician-data:/app/data
+    
+    # Port mapping (optional - for debugging sidecar)
+    # The MCP server uses stdio, not network ports
+    ports:
+      - "8787:8787"  # Python sidecar (optional, for debugging)
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Allow time for ML models to load
+    
+    # Resource limits (adjust based on your system)
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Named volumes for data persistence
+volumes:
+  politician-data:
+    driver: local
