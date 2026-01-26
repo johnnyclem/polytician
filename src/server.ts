@@ -18,6 +18,7 @@ import { convertCommands } from "./commands/convert.js";
 import { conceptService } from "./services/concept.service.js";
 import { pythonBridge } from "./services/python-bridge.js";
 import { initializeDatabase, closeDatabase } from "./db/client.js";
+import { metricsCollector } from "./utils/metrics.js";
 
 // Combine all commands
 const allCommands = {
@@ -57,6 +58,138 @@ const utilityCommands = {
           success: false,
           error: error instanceof Error ? error.message : "Unknown error",
         };
+      }
+    },
+  get_representations: {
+    description: "Check which representations exist for a concept",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", format: "uuid", description: "Concept UUID" },
+      },
+      required: ["id"],
+    },
+    handler: async (input: unknown) => {
+      try {
+        const { id } = input as { id: string };
+        const reps = await conceptService.getRepresentations(id);
+        return { success: true, data: reps };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    },
+  delete_concept: {
+    description: "Delete a concept and all its representations",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", format: "uuid", description: "Concept UUID" },
+      },
+      required: ["id"],
+    },
+    handler: async (input: unknown) => {
+      try {
+        const { id } = input as { id: string };
+        await conceptService.delete(id);
+        return { success: true, data: { deleted: id } };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    },
+  generate_id: {
+    description: "Generate a new UUID for a concept",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const id = conceptService.generateId();
+        return { success: true, data: { id } };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    },
+  health_check: {
+    description: "Check the health of the server and Python sidecar",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const pythonHealth = await pythonBridge.getHealth();
+        const circuitStats = pythonBridge.getCircuitBreakerStats();
+        return {
+          success: true,
+          data: {
+            server: "ok",
+            python_sidecar: pythonHealth,
+            circuit_breaker: circuitStats,
+          },
+        };
+      } catch (error) {
+        return {
+          success: true,
+          data: {
+            server: "ok",
+            python_sidecar: {
+              status: "error",
+              error: error instanceof Error ? error.message : "Unknown error",
+            },
+            circuit_breaker: circuitStats,
+          },
+        };
+      }
+    },
+  get_circuit_breaker_stats: {
+    description: "Get circuit breaker statistics",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const stats = pythonBridge.getCircuitBreakerStats();
+        return { success: true, data: stats };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    },
+  reset_circuit_breaker: {
+    description: "Reset all circuit breakers",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        circuitBreakerManager.resetAll();
+        return { success: true, data: { message: "All circuit breakers reset" } };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    },
+};
       }
     },
   },

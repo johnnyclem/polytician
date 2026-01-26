@@ -1,0 +1,6 @@
+# Prettier ignore file
+dist/
+node_modules/
+coverage/
+*.js
+python-sidecar/

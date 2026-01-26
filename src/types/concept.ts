@@ -1,5 +1,5 @@
-import { z } from "zod";
-import { ThoughtFormSchema, ThoughtFormInputSchema } from "./thoughtform.js";
+import { z } from 'zod';
+import { ThoughtFormSchema, ThoughtFormInputSchema } from './thoughtform.js';
 
 /**
  * Vector representation - fixed 768 dimensions (all-MiniLM-L6-v2)
@@ -18,7 +18,7 @@ export type Markdown = z.infer<typeof MarkdownSchema>;
 /**
  * Representation types
  */
-export type RepresentationType = "vectors" | "md" | "thoughtForm";
+export type RepresentationType = 'vectors' | 'md' | 'thoughtForm';
 
 /**
  * Full concept with all representations

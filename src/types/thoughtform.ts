@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from 'zod';
 
 /**
  * Entity extracted from text via NER
@@ -47,7 +47,7 @@ export type Metadata = z.infer<typeof MetadataSchema>;
 export const ThoughtFormSchema = z.object({
   id: z.string().uuid(),
   rawText: z.string(),
-  language: z.string().default("en"), // ISO-639-1
+  language: z.string().default('en'), // ISO-639-1
   metadata: MetadataSchema,
   entities: z.array(EntitySchema).default([]),
   relationships: z.array(RelationshipSchema).default([]),
@@ -63,7 +63,7 @@ export type ThoughtForm = z.infer<typeof ThoughtFormSchema>;
 export const ThoughtFormInputSchema = z.object({
   id: z.string().uuid().optional(),
   rawText: z.string().min(1),
-  language: z.string().default("en"),
+  language: z.string().default('en'),
   metadata: MetadataSchema.partial().optional(),
   entities: z.array(EntitySchema).optional(),
   relationships: z.array(RelationshipSchema).optional(),

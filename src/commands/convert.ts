@@ -4,11 +4,11 @@
  * Handlers for all 6 conversion operations between vector, markdown, and ThoughtForm
  */
 
-import { z } from "zod";
-import { conversionService } from "../services/conversion.service.js";
-import { ConvertConceptInputSchema, VECTOR_DIMENSION } from "../types/concept.js";
-import type { ConceptResponse, Vector, Markdown } from "../types/concept.js";
-import type { ThoughtForm } from "../types/thoughtform.js";
+import { z } from 'zod';
+import { conversionService } from '../services/conversion.service.js';
+import { ConvertConceptInputSchema, VECTOR_DIMENSION } from '../types/concept.js';
+import type { ConceptResponse, Vector, Markdown } from '../types/concept.js';
+import type { ThoughtForm } from '../types/thoughtform.js';
 
 /**
  * Convert ThoughtForm to Vector
@@ -28,12 +28,12 @@ export async function convertThoughtFormToVectors(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -56,12 +56,12 @@ export async function convertThoughtFormToMarkdown(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -84,12 +84,12 @@ export async function convertVectorsToThoughtForm(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -112,12 +112,12 @@ export async function convertVectorsToMarkdown(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -140,12 +140,12 @@ export async function convertMarkdownToVectors(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -168,54 +168,54 @@ export async function convertMarkdownToThoughtForm(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
 
 // Common input schema for all convert commands
 const convertInputSchema = {
-  type: "object",
+  type: 'object',
   properties: {
-    id: { type: "string", format: "uuid", description: "Concept UUID" },
+    id: { type: 'string', format: 'uuid', description: 'Concept UUID' },
   },
-  required: ["id"],
+  required: ['id'],
 };
 
 // Export command definitions for MCP tool registration
 export const convertCommands = {
   convert_concept_from_thoughtForm_to_vectors: {
-    description: "Convert ThoughtForm to vector representation by embedding the raw text",
+    description: 'Convert ThoughtForm to vector representation by embedding the raw text',
     inputSchema: convertInputSchema,
     handler: convertThoughtFormToVectors,
   },
   convert_concept_from_thoughtForm_to_md: {
-    description: "Convert ThoughtForm to markdown by formatting entities and relationships",
+    description: 'Convert ThoughtForm to markdown by formatting entities and relationships',
     inputSchema: convertInputSchema,
     handler: convertThoughtFormToMarkdown,
   },
   convert_concept_from_vectors_to_thoughtForm: {
-    description: "Convert vector to ThoughtForm by finding similar concepts and reconstructing",
+    description: 'Convert vector to ThoughtForm by finding similar concepts and reconstructing',
     inputSchema: convertInputSchema,
     handler: convertVectorsToThoughtForm,
   },
   convert_concept_from_vectors_to_md: {
-    description: "Convert vector to markdown by finding similar concepts and summarizing",
+    description: 'Convert vector to markdown by finding similar concepts and summarizing',
     inputSchema: convertInputSchema,
     handler: convertVectorsToMarkdown,
   },
   convert_concept_from_md_to_vectors: {
-    description: "Convert markdown to vector representation by embedding the text",
+    description: 'Convert markdown to vector representation by embedding the text',
     inputSchema: convertInputSchema,
     handler: convertMarkdownToVectors,
   },
   convert_concept_from_md_to_thoughtForm: {
-    description: "Convert markdown to ThoughtForm by extracting entities via NER",
+    description: 'Convert markdown to ThoughtForm by extracting entities via NER',
     inputSchema: convertInputSchema,
     handler: convertMarkdownToThoughtForm,
   },

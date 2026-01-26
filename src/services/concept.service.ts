@@ -4,13 +4,22 @@
  * CRUD operations for concepts with vector, markdown, and ThoughtForm representations.
  */
 
-import { eq } from "drizzle-orm";
-import { v4 as uuidv4 } from "uuid";
-import { db } from "../db/client.js";
-import { concepts, type ConceptRow } from "../db/schema.js";
-import { VECTOR_DIMENSION, type Vector, type Markdown } from "../types/concept.js";
-import type { ThoughtForm, ThoughtFormInput } from "../types/thoughtform.js";
-import { pythonBridge } from "./python-bridge.js";
+import { eq } from 'drizzle-orm';
+import { v4 as uuidv4 } from 'uuid';
+import { db } from '../db/client.js';
+import { concepts, type ConceptRow } from '../db/schema.js';
+import { VECTOR_DIMENSION, type Vector, type Markdown } from '../types/concept.js';
+import type { ThoughtForm, ThoughtFormInput } from '../types/thoughtform.js';
+import { pythonBridge } from './python-bridge.js';
+import {
+  DimensionMismatchError,
+  NotFoundError,
+  DatabaseError,
+  logError,
+  ValidationError,
+  ErrorHandler,
+} from '../errors/index.js';
+import { atomicSave, updateIfExists } from '../db/transactions.js';
 
 /**
  * Serialize a vector to a Buffer for storage
@@ -24,11 +33,7 @@ function vectorToBuffer(vector: Vector): Buffer {
  * Deserialize a Buffer to a vector
  */
 function bufferToVector(buffer: Buffer): Vector {
-  const float32Array = new Float32Array(
-    buffer.buffer,
-    buffer.byteOffset,
-    buffer.length / 4
-  );
+  const float32Array = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.length / 4);
   return Array.from(float32Array);
 }
 
@@ -56,36 +61,29 @@ export class ConceptService {
     tags?: string[]
   ): Promise<{ success: boolean; id: string }> {
     if (vector.length !== VECTOR_DIMENSION) {
-      throw new Error(
-        `Vector dimension mismatch: expected ${VECTOR_DIMENSION}, got ${vector.length}`
-      );
+      throw new DimensionMismatchError(VECTOR_DIMENSION, vector.length);
     }
 
     const now = new Date();
     const vectorBlob = vectorToBuffer(vector);
 
-    // Check if concept exists
-    const existing = await this.getById(id);
-
-    if (existing) {
-      // Update existing
-      await db
-        .update(concepts)
-        .set({
-          updatedAt: now,
-          vectorBlob,
-          tags: tags ?? existing.tags,
-        })
-        .where(eq(concepts.id, id));
-    } else {
-      // Insert new
-      await db.insert(concepts).values({
-        id,
-        createdAt: now,
-        updatedAt: now,
-        vectorBlob,
-        tags: tags ?? [],
-      });
+    // Use atomic save operation (transaction)
+    const result = await atomicSave(concepts, id, {
+      updatedAt: now,
+      vectorBlob,
+      tags: tags ?? [],
+      createdAt: now,
+    });
+    
+    // Only add to FAISS index if this was a new insertion or successful update
+    if (result.created || result.updated) {
+      try {
+        await pythonBridge.addToIndex(id, vector);
+      } catch (error) {
+        logError(ErrorHandler.normalize(error), { operation: 'addToIndex', conceptId: id });
+        // Don't fail the entire operation if index update fails
+        console.warn('FAISS index update failed, but concept was saved');
+      }
     }
 
     // Update FAISS index
@@ -142,12 +140,12 @@ export class ConceptService {
     const tfWithId: ThoughtForm = {
       id,
       rawText: thoughtForm.rawText,
-      language: thoughtForm.language ?? "en",
+      language: thoughtForm.language ?? 'en',
       metadata: {
         timestamp: thoughtForm.metadata?.timestamp ?? now.toISOString(),
         author: thoughtForm.metadata?.author ?? null,
         tags: thoughtForm.metadata?.tags ?? tags ?? [],
-        source: thoughtForm.metadata?.source ?? "user_input",
+        source: thoughtForm.metadata?.source ?? 'user_input',
       },
       entities: thoughtForm.entities ?? [],
       relationships: thoughtForm.relationships ?? [],
@@ -217,11 +215,7 @@ export class ConceptService {
    * Get a concept row by ID
    */
   async getById(id: string): Promise<ConceptRow | null> {
-    const rows = await db
-      .select()
-      .from(concepts)
-      .where(eq(concepts.id, id))
-      .limit(1);
+    const rows = await db.select().from(concepts).where(eq(concepts.id, id)).limit(1);
 
     return rows[0] ?? null;
   }

@@ -4,11 +4,11 @@
  * Handlers for read_concept_from_vectors, read_concept_from_md, read_concept_from_thoughtForm
  */
 
-import { z } from "zod";
-import { conceptService } from "../services/concept.service.js";
-import { ReadConceptInputSchema, VECTOR_DIMENSION } from "../types/concept.js";
-import type { ConceptResponse, Vector, Markdown } from "../types/concept.js";
-import type { ThoughtForm } from "../types/thoughtform.js";
+import { z } from 'zod';
+import { conceptService } from '../services/concept.service.js';
+import { ReadConceptInputSchema, VECTOR_DIMENSION } from '../types/concept.js';
+import type { ConceptResponse, Vector, Markdown } from '../types/concept.js';
+import type { ThoughtForm } from '../types/thoughtform.js';
 
 /**
  * Read concept as vectors
@@ -36,12 +36,12 @@ export async function readConceptFromVectors(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -72,12 +72,12 @@ export async function readConceptFromMarkdown(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -108,12 +108,12 @@ export async function readConceptFromThoughtForm(
     if (error instanceof z.ZodError) {
       return {
         success: false,
-        error: `Validation error: ${error.errors.map((e) => e.message).join(", ")}`,
+        error: `Validation error: ${error.errors.map(e => e.message).join(', ')}`,
       };
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
@@ -121,35 +121,35 @@ export async function readConceptFromThoughtForm(
 // Export command definitions for MCP tool registration
 export const readCommands = {
   read_concept_from_vectors: {
-    description: "Read the vector representation (768-dim float array) for a concept",
+    description: 'Read the vector representation (768-dim float array) for a concept',
     inputSchema: {
-      type: "object",
+      type: 'object',
       properties: {
-        id: { type: "string", format: "uuid", description: "Concept UUID" },
+        id: { type: 'string', format: 'uuid', description: 'Concept UUID' },
       },
-      required: ["id"],
+      required: ['id'],
     },
     handler: readConceptFromVectors,
   },
   read_concept_from_md: {
-    description: "Read the markdown representation for a concept",
+    description: 'Read the markdown representation for a concept',
     inputSchema: {
-      type: "object",
+      type: 'object',
       properties: {
-        id: { type: "string", format: "uuid", description: "Concept UUID" },
+        id: { type: 'string', format: 'uuid', description: 'Concept UUID' },
       },
-      required: ["id"],
+      required: ['id'],
     },
     handler: readConceptFromMarkdown,
   },
   read_concept_from_thoughtForm: {
-    description: "Read the ThoughtForm (structured JSON) representation for a concept",
+    description: 'Read the ThoughtForm (structured JSON) representation for a concept',
     inputSchema: {
-      type: "object",
+      type: 'object',
       properties: {
-        id: { type: "string", format: "uuid", description: "Concept UUID" },
+        id: { type: 'string', format: 'uuid', description: 'Concept UUID' },
       },
-      required: ["id"],
+      required: ['id'],
     },
     handler: readConceptFromThoughtForm,
   },

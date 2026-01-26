@@ -53,7 +53,31 @@ RUN pip install --no-cache-dir --upgrade pip && \
 RUN python -m spacy download en_core_web_sm
 
 # -----------------------------------------------------------------------------
-# Stage 3: Runtime
+# Stage 3: Production Runtime
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim AS production
+
+# Install security updates and minimal dependencies
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        dumb-init \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get autoremove -y \
+    && apt-get clean
+
+# Install Node.js securely
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r politician && \
+    useradd -r -g politician -d /app -s /sbin/nologin politician
+
+# -----------------------------------------------------------------------------
+# Stage 4: Runtime (development)
 # -----------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
@@ -78,24 +102,31 @@ COPY --from=node-builder /build/package.json ./
 # Copy Python sidecar source
 COPY python-sidecar/ ./python-sidecar/
 
-# Create data directory
-RUN mkdir -p /app/data
+# Create directories with proper permissions
+RUN mkdir -p /app/data /app/logs /tmp && \
+    chown -R politician:politician /app && \
+    chmod 700 /app/data && \
+    chmod 755 /app/logs && \
+    chmod 1777 /tmp
 
-# Set environment variables
+# Switch to non-root user
+USER politician
+
+# Set environment variables (production secure defaults)
 ENV NODE_ENV=production
 ENV SIDECAR_HOST=127.0.0.1
 ENV SIDECAR_PORT=8787
 ENV DB_PATH=/app/data/concepts.db
+ENV LOG_LEVEL=warn
 
-# Expose sidecar port (for debugging only - not needed for MCP)
-EXPOSE 8787
+# NO EXPOSE for production - sidecar is internal only
 
-# Health check
+# Enhanced health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8787/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8787/health').read()"
 
-# Volume for persistent data
-VOLUME ["/app/data"]
+# Volume for persistent data (restricted permissions)
+VOLUME ["/app/data", "/app/logs"]
 
 # Start the MCP server (which spawns the Python sidecar)
 CMD ["node", "dist/index.js"]

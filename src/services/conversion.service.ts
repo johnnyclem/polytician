@@ -12,10 +12,10 @@
  * - md → thoughtForm: Parse markdown, extract entities via NER
  */
 
-import { conceptService } from "./concept.service.js";
-import { pythonBridge } from "./python-bridge.js";
-import type { Vector, Markdown } from "../types/concept.js";
-import type { ThoughtForm, ThoughtFormInput } from "../types/thoughtform.js";
+import { conceptService } from './concept.service.js';
+import { pythonBridge } from './python-bridge.js';
+import type { Vector, Markdown } from '../types/concept.js';
+import type { ThoughtForm, ThoughtFormInput } from '../types/thoughtform.js';
 
 export class ConversionService {
   // ============ ThoughtForm Conversions ============
@@ -58,51 +58,51 @@ export class ConversionService {
     const parts: string[] = [];
 
     // Title (use first few words of raw text)
-    const titleWords = tf.rawText.split(/\s+/).slice(0, 5).join(" ");
-    parts.push(`# ${titleWords}${tf.rawText.split(/\s+/).length > 5 ? "..." : ""}\n`);
+    const titleWords = tf.rawText.split(/\s+/).slice(0, 5).join(' ');
+    parts.push(`# ${titleWords}${tf.rawText.split(/\s+/).length > 5 ? '...' : ''}\n`);
 
     // Metadata
-    parts.push("## Metadata\n");
+    parts.push('## Metadata\n');
     parts.push(`- **Language:** ${tf.language}`);
     parts.push(`- **Created:** ${tf.metadata.timestamp}`);
     if (tf.metadata.author) {
       parts.push(`- **Author:** ${tf.metadata.author}`);
     }
     if (tf.metadata.tags.length > 0) {
-      parts.push(`- **Tags:** ${tf.metadata.tags.join(", ")}`);
+      parts.push(`- **Tags:** ${tf.metadata.tags.join(', ')}`);
     }
-    parts.push("");
+    parts.push('');
 
     // Raw text
-    parts.push("## Content\n");
+    parts.push('## Content\n');
     parts.push(tf.rawText);
-    parts.push("");
+    parts.push('');
 
     // Entities
     if (tf.entities.length > 0) {
-      parts.push("## Entities\n");
+      parts.push('## Entities\n');
       for (const entity of tf.entities) {
         parts.push(
           `- **${entity.text}** (${entity.type}, confidence: ${(entity.confidence * 100).toFixed(0)}%)`
         );
       }
-      parts.push("");
+      parts.push('');
     }
 
     // Relationships
     if (tf.relationships.length > 0) {
-      parts.push("## Relationships\n");
+      parts.push('## Relationships\n');
       for (const rel of tf.relationships) {
-        const subject = tf.entities.find((e) => e.id === rel.subjectId);
-        const object = tf.entities.find((e) => e.id === rel.objectId);
+        const subject = tf.entities.find(e => e.id === rel.subjectId);
+        const object = tf.entities.find(e => e.id === rel.objectId);
         if (subject && object) {
           parts.push(`- ${subject.text} **${rel.predicate}** ${object.text}`);
         }
       }
-      parts.push("");
+      parts.push('');
     }
 
-    const md = parts.join("\n");
+    const md = parts.join('\n');
 
     // Save the markdown representation
     await conceptService.saveMarkdown(id, md);
@@ -146,8 +146,9 @@ export class ConversionService {
     // Generate a synthetic ThoughtForm based on neighbors
     let rawText: string;
     if (neighborTexts.length > 0) {
-      rawText = `Reconstructed from ${neighborTexts.length} similar concepts:\n\n` +
-        neighborTexts.map((t, i) => `${i + 1}. ${t.slice(0, 200)}`).join("\n\n");
+      rawText =
+        `Reconstructed from ${neighborTexts.length} similar concepts:\n\n` +
+        neighborTexts.map((t, i) => `${i + 1}. ${t.slice(0, 200)}`).join('\n\n');
     } else {
       rawText = `Vector representation (${vector.length} dimensions). No similar concepts found for reconstruction.`;
     }
@@ -158,12 +159,12 @@ export class ConversionService {
     const tf: ThoughtForm = {
       id,
       rawText,
-      language: "en",
+      language: 'en',
       metadata: {
         timestamp: new Date().toISOString(),
         author: null,
-        tags: ["reconstructed", "from_vector"],
-        source: "converted",
+        tags: ['reconstructed', 'from_vector'],
+        source: 'converted',
       },
       entities: nerResult.entities.map((e, i) => ({
         id: `ent_${i}`,
@@ -266,12 +267,12 @@ export class ConversionService {
     const tf: ThoughtForm = {
       id,
       rawText: md,
-      language: "en",
+      language: 'en',
       metadata: {
         timestamp: new Date().toISOString(),
         author: null,
-        tags: ["from_markdown"],
-        source: "converted",
+        tags: ['from_markdown'],
+        source: 'converted',
       },
       entities: nerResult.entities.map((e, i) => ({
         id: `ent_${i}`,
@@ -297,8 +298,8 @@ export class ConversionService {
    */
   async convert(
     id: string,
-    from: "vectors" | "md" | "thoughtForm",
-    to: "vectors" | "md" | "thoughtForm"
+    from: 'vectors' | 'md' | 'thoughtForm',
+    to: 'vectors' | 'md' | 'thoughtForm'
   ): Promise<Vector | Markdown | ThoughtForm> {
     if (from === to) {
       throw new Error(`Cannot convert ${from} to itself`);
@@ -308,17 +309,17 @@ export class ConversionService {
     const conversionKey = `${from}_to_${to}`;
 
     switch (conversionKey) {
-      case "thoughtForm_to_vectors":
+      case 'thoughtForm_to_vectors':
         return this.thoughtFormToVector(id);
-      case "thoughtForm_to_md":
+      case 'thoughtForm_to_md':
         return this.thoughtFormToMarkdown(id);
-      case "vectors_to_thoughtForm":
+      case 'vectors_to_thoughtForm':
         return this.vectorToThoughtForm(id);
-      case "vectors_to_md":
+      case 'vectors_to_md':
         return this.vectorToMarkdown(id);
-      case "md_to_vectors":
+      case 'md_to_vectors':
         return this.markdownToVector(id);
-      case "md_to_thoughtForm":
+      case 'md_to_thoughtForm':
         return this.markdownToThoughtForm(id);
       default:
         throw new Error(`Unknown conversion: ${from} → ${to}`);
