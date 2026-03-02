@@ -45,6 +45,28 @@ export class EmbeddingService {
     return embedding;
   }
 
+  /**
+   * Generate embeddings for multiple texts in batches.
+   * Processes texts concurrently within each batch to maximize throughput
+   * while controlling memory usage.
+   */
+  async embedBatch(texts: string[], batchSize: number = 50): Promise<number[][]> {
+    await loadModel();
+    if (!pipelineFn) throw new Error('Embedding model failed to load');
+
+    const results: number[][] = [];
+
+    for (let i = 0; i < texts.length; i += batchSize) {
+      const batch = texts.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map(text => this.embed(text))
+      );
+      results.push(...batchResults);
+    }
+
+    return results;
+  }
+
   async isLoaded(): Promise<boolean> {
     return pipelineFn !== null;
   }
