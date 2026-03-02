@@ -5,6 +5,7 @@ import { concepts } from '../db/schema.js';
 import type { Concept, ConceptRepresentations } from '../types/concept.js';
 import { VECTOR_DIMENSION } from '../types/concept.js';
 import type { ThoughtForm } from '../types/thoughtform.js';
+import { conceptEventBus } from '../events/concept-events.js';
 
 function deserializeEmbedding(buf: Buffer | null): number[] | null {
   if (!buf) return null;
@@ -85,6 +86,12 @@ export class ConceptService {
       if (params.embedding !== undefined) {
         this.upsertVector(id, params.embedding);
       }
+
+      conceptEventBus.emit('concept.updated', {
+        conceptId: id,
+        embedding: params.embedding ?? null,
+        timestamp: now,
+      });
     } else {
       const tags = params.tags ?? [];
       sqlite
@@ -106,6 +113,12 @@ export class ConceptService {
       if (params.embedding) {
         this.upsertVector(id, params.embedding);
       }
+
+      conceptEventBus.emit('concept.created', {
+        conceptId: id,
+        embedding: params.embedding ?? null,
+        timestamp: now,
+      });
     }
 
     const saved = db.select().from(concepts).where(eq(concepts.id, id)).get();
@@ -155,6 +168,8 @@ export class ConceptService {
 
     sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
     db.delete(concepts).where(eq(concepts.id, id)).run();
+
+    conceptEventBus.emit('concept.deleted', { conceptId: id, timestamp: Date.now() });
   }
 
   async list(params?: { limit?: number; offset?: number; tags?: string[] }): Promise<{
