@@ -7,6 +7,8 @@ export type RepresentationType = 'vector' | 'markdown' | 'thoughtform';
 
 export const ConceptSchema = z.object({
   id: z.string().uuid(),
+  namespace: z.string().default('default'),
+  version: z.number().int().positive(),
   createdAt: z.number(),
   updatedAt: z.number(),
   tags: z.array(z.string()).default([]),

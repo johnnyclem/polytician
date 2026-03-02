@@ -33,3 +33,15 @@ export class ConfigurationError extends PolyticianError {
     super(message, 'CONFIG_ERROR');
   }
 }
+
+export class VersionConflictError extends PolyticianError {
+  public readonly currentVersion: number;
+
+  constructor(id: string, expectedVersion: number, currentVersion: number) {
+    super(
+      `Version conflict on concept '${id}': expected version ${expectedVersion}, but current version is ${currentVersion}`,
+      'VERSION_CONFLICT'
+    );
+    this.currentVersion = currentVersion;
+  }
+}

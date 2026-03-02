@@ -5,6 +5,8 @@ import { createServer } from './server.js';
 import { initializeDatabase, closeDatabase } from './db/client.js';
 import { startHealthServer } from './health.js';
 import { logger } from './logger.js';
+import { indexSyncService } from './services/index-sync.service.js';
+import { getConfig } from './config.js';
 
 async function main(): Promise<void> {
   // Initialize database (creates tables, loads sqlite-vec)
@@ -13,6 +15,13 @@ async function main(): Promise<void> {
 
   // Start HTTP health check server
   const healthServer = startHealthServer();
+
+  // Start async index synchronisation if enabled (or always, for
+  // event-driven readiness even in single-node mode).
+  const config = getConfig();
+  if (config.distributed.asyncIndexSync) {
+    indexSyncService.start();
+  }
 
   // Create MCP server with all tools registered
   const server = createServer();
@@ -26,6 +35,7 @@ async function main(): Promise<void> {
   const shutdown = (): void => {
     logger.info('shutdown initiated');
     healthServer.close();
+    indexSyncService.stop();
     closeDatabase();
     process.exit(0);
   };

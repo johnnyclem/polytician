@@ -8,6 +8,41 @@ export interface LLMConfig {
   apiKey?: string;
 }
 
+/**
+ * Configuration for distributed / multi-node deployments.
+ *
+ * In a single-node setup all fields can be left at their defaults.
+ *
+ * For stateless horizontal scaling behind a load balancer:
+ *   - Set `externalStateUrl` to a shared PostgreSQL or other supported
+ *     backend so that all nodes share the same concept store.
+ *   - Set `vectorIndexUrl` to a shared vector service (e.g. pgvector,
+ *     Qdrant, Weaviate) so that the index is consistent across nodes.
+ *
+ * When `asyncIndexSync` is true the IndexSyncService processes vector
+ * index updates from the event bus asynchronously, which is the required
+ * pattern for event-driven synchronisation across nodes.
+ */
+export interface DistributedConfig {
+  /** Unique identifier for this server instance (auto-generated if unset). */
+  nodeId: string;
+  /**
+   * URL of the shared concept state backend.
+   * Supports `sqlite://path` (default, single-node) and `postgres://…`.
+   */
+  externalStateUrl: string | null;
+  /**
+   * URL of a shared vector index service.
+   * When null the local sqlite-vec table is used.
+   */
+  vectorIndexUrl: string | null;
+  /**
+   * When true, the IndexSyncService subscribes to concept events and
+   * applies vector index changes asynchronously via the event bus.
+   */
+  asyncIndexSync: boolean;
+}
+
 export interface PolyticianConfig {
   dataDir: string;
   dbPath: string;
@@ -16,6 +51,7 @@ export interface PolyticianConfig {
   llm: LLMConfig;
   healthPort: number;
   sidecarUrl: string | null;
+  distributed: DistributedConfig;
 }
 
 const DEFAULT_DATA_DIR = join(homedir(), '.polytician');
@@ -56,6 +92,7 @@ export function getConfig(): PolyticianConfig {
 
   const healthPortRaw = process.env['POLYTICIAN_HEALTH_PORT'] ?? String(fileConfig.healthPort ?? '8787');
   const sidecarUrl = process.env['POLYTICIAN_SIDECAR_URL'] ?? (fileConfig.sidecarUrl as string | undefined) ?? null;
+  const distFile = (fileConfig as { distributed?: Partial<DistributedConfig> }).distributed ?? {};
 
   cachedConfig = {
     dataDir,
@@ -69,9 +106,26 @@ export function getConfig(): PolyticianConfig {
     },
     healthPort: parseInt(healthPortRaw, 10) || 8787,
     sidecarUrl,
+    distributed: {
+      nodeId: process.env['POLYTICIAN_NODE_ID'] ?? distFile.nodeId ?? generateNodeId(),
+      externalStateUrl: process.env['POLYTICIAN_EXTERNAL_STATE_URL'] ?? distFile.externalStateUrl ?? null,
+      vectorIndexUrl: process.env['POLYTICIAN_VECTOR_INDEX_URL'] ?? distFile.vectorIndexUrl ?? null,
+      asyncIndexSync: parseBool(process.env['POLYTICIAN_ASYNC_INDEX_SYNC']) ?? distFile.asyncIndexSync ?? false,
+    },
   };
 
   return cachedConfig;
+}
+
+function generateNodeId(): string {
+  // Stable within a process; a real deployment would persist this to disk or
+  // derive it from the pod/container identity.
+  return `node-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function parseBool(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value === '1' || value.toLowerCase() === 'true';
 }
 
 export function resetConfig(): void {

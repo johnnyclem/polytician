@@ -79,6 +79,7 @@ describe('MCP Server — Tool integration', () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     expect(names).toEqual([
+      'batch_save_concepts',
       'convert_concept',
       'delete_concept',
       'embed_text',
@@ -97,12 +98,15 @@ describe('MCP Server — Tool integration', () => {
     const saved = await callTool('save_concept', {
       markdown: '# Test concept via MCP',
       tags: ['mcp-test'],
-    }) as { id: string };
+    }) as { id: string; namespace: string; version: number };
     expect(saved.id).toBeDefined();
+    expect(saved.namespace).toBe('default');
+    expect(saved.version).toBe(1);
 
-    const read = await callTool('read_concept', { id: saved.id }) as { markdown: string; tags: string[] };
+    const read = await callTool('read_concept', { id: saved.id }) as { markdown: string; tags: string[]; version: number };
     expect(read.markdown).toBe('# Test concept via MCP');
     expect(read.tags).toContain('mcp-test');
+    expect(read.version).toBe(1);
   });
 
   // --- convert_concept: thoughtform → markdown ---
@@ -267,6 +271,44 @@ describe('MCP Server — Tool integration', () => {
     expect(page2.concepts).toHaveLength(1);
   });
 
+  // --- batch_save_concepts ---
+
+  it('should batch save multiple concepts via MCP tool', async () => {
+    const result = await callTool('batch_save_concepts', {
+      concepts: [
+        { markdown: '# Batch One', tags: ['batch-mcp'] },
+        { markdown: '# Batch Two', tags: ['batch-mcp'] },
+        { markdown: '# Batch Three', tags: ['batch-mcp'] },
+      ],
+    }) as { count: number; ids: string[] };
+
+    expect(result.count).toBe(3);
+    expect(result.ids).toHaveLength(3);
+
+    const list = await callTool('list_concepts', { tags: ['batch-mcp'] }) as { total: number };
+    expect(list.total).toBe(3);
+  });
+
+  it('should batch save with auto-embed via MCP tool', async () => {
+    const result = await callTool('batch_save_concepts', {
+      concepts: [
+        { markdown: '# Auto embed one' },
+        { markdown: '# Auto embed two' },
+      ],
+      autoEmbed: true,
+    }) as { count: number; ids: string[] };
+
+    expect(result.count).toBe(2);
+
+    // Verify embeddings were generated
+    for (const id of result.ids) {
+      const concept = await callTool('read_concept', { id, representations: ['vector'] }) as {
+        embedding: number[];
+      };
+      expect(concept.embedding).toHaveLength(VECTOR_DIMENSION);
+    }
+  });
+
   // --- get_stats ---
 
   it('should return database stats', async () => {
@@ -280,5 +322,121 @@ describe('MCP Server — Tool integration', () => {
 
     expect(stats.conceptCount).toBeGreaterThanOrEqual(1);
     expect(stats.representationCounts.markdown).toBeGreaterThanOrEqual(1);
+  });
+
+  // --- Namespace isolation via MCP ---
+
+  it('should save concepts with namespace via MCP tools', async () => {
+    const saved = await callTool('save_concept', {
+      namespace: 'agent-x',
+      markdown: '# Agent X concept',
+    }) as { id: string; namespace: string };
+
+    expect(saved.namespace).toBe('agent-x');
+  });
+
+  it('should scope list_concepts to namespace via MCP', async () => {
+    await callTool('save_concept', { namespace: 'agent-a', markdown: '# A' });
+    await callTool('save_concept', { namespace: 'agent-b', markdown: '# B' });
+
+    const listA = await callTool('list_concepts', { namespace: 'agent-a' }) as {
+      concepts: Array<{ namespace: string }>;
+      total: number;
+    };
+    expect(listA.total).toBe(1);
+    expect(listA.concepts[0]!.namespace).toBe('agent-a');
+  });
+
+  it('should scope search_concepts to namespace via MCP', async () => {
+    await callTool('save_concept', { namespace: 'agent-a', markdown: '# Agent A data' });
+    await callTool('convert_concept', {
+      id: ((await callTool('list_concepts', { namespace: 'agent-a' })) as { concepts: Array<{ id: string }> }).concepts[0]!.id,
+      from: 'markdown',
+      to: 'vector',
+    });
+    await callTool('save_concept', { namespace: 'agent-b', markdown: '# Agent B data' });
+
+    const results = await callTool('search_concepts', {
+      query: 'Agent data',
+      namespace: 'agent-a',
+      k: 10,
+    }) as Array<{ namespace: string }>;
+
+    expect(Array.isArray(results)).toBe(true);
+    for (const r of results) {
+      expect(r.namespace).toBe('agent-a');
+    }
+  });
+
+  it('should allow cross-namespace search via MCP', async () => {
+    const savedA = await callTool('save_concept', {
+      namespace: 'agent-a',
+      markdown: '# Cross namespace test A',
+    }) as { id: string };
+    await callTool('convert_concept', { id: savedA.id, from: 'markdown', to: 'vector' });
+
+    const savedB = await callTool('save_concept', {
+      namespace: 'agent-b',
+      markdown: '# Cross namespace test B',
+    }) as { id: string };
+    await callTool('convert_concept', { id: savedB.id, from: 'markdown', to: 'vector' });
+
+    const results = await callTool('search_concepts', {
+      query: 'Cross namespace test',
+      crossNamespace: true,
+      k: 10,
+    }) as Array<{ namespace: string }>;
+
+    expect(Array.isArray(results)).toBe(true);
+    const namespaces = new Set(results.map(r => r.namespace));
+    expect(namespaces.size).toBeGreaterThanOrEqual(2);
+  });
+
+  // --- Optimistic concurrency via MCP ---
+
+  it('should return version in save_concept response', async () => {
+    const saved = await callTool('save_concept', { markdown: '# Version test' }) as { version: number };
+    expect(saved.version).toBe(1);
+  });
+
+  it('should accept expectedVersion for optimistic concurrency via MCP', async () => {
+    const saved = await callTool('save_concept', { markdown: '# V1' }) as { id: string; version: number };
+    const updated = await callTool('save_concept', {
+      id: saved.id,
+      expectedVersion: 1,
+      markdown: '# V2',
+    }) as { version: number; markdown: string };
+
+    expect(updated.version).toBe(2);
+    expect(updated.markdown).toBe('# V2');
+  });
+
+  it('should return error for version conflict via MCP', async () => {
+    const saved = await callTool('save_concept', { markdown: '# V1' }) as { id: string };
+    await callTool('save_concept', { id: saved.id, markdown: '# V2' }); // Now at version 2
+
+    const result = await client.callTool({
+      name: 'save_concept',
+      arguments: { id: saved.id, expectedVersion: 1, markdown: '# Stale' },
+    }) as { content: Array<{ text: string }>; isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    const errorBody = JSON.parse(result.content[0]!.text) as { code: string; currentVersion: number };
+    expect(errorBody.code).toBe('VERSION_CONFLICT');
+    expect(errorBody.currentVersion).toBe(2);
+  });
+
+  // --- Namespace-scoped stats via MCP ---
+
+  it('should return namespace-scoped stats', async () => {
+    await callTool('save_concept', { namespace: 'agent-a', markdown: '# A1' });
+    await callTool('save_concept', { namespace: 'agent-a', markdown: '# A2' });
+    await callTool('save_concept', { namespace: 'agent-b', markdown: '# B1' });
+
+    const statsA = await callTool('get_stats', { namespace: 'agent-a' }) as { conceptCount: number };
+    expect(statsA.conceptCount).toBe(2);
+
+    const statsB = await callTool('get_stats', { namespace: 'agent-b' }) as { conceptCount: number };
+    expect(statsB.conceptCount).toBe(1);
   });
 });
