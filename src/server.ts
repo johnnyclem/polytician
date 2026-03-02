@@ -1,395 +1,166 @@
-/**
- * MCP Server Setup
- *
- * Configures the Anthropic Model Context Protocol server with all tools.
- */
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { conceptService } from './services/concept.service.js';
+import { conversionService } from './services/conversion.service.js';
+import { embeddingService } from './services/embedding.service.js';
+import { VECTOR_DIMENSION } from './types/concept.js';
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  type Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+export function createServer(): McpServer {
+  const server = new McpServer({
+    name: 'polytician',
+    version: '2.0.0',
+  });
 
-import { saveCommands } from "./commands/save.js";
-import { readCommands } from "./commands/read.js";
-import { convertCommands } from "./commands/convert.js";
-import { conceptService } from "./services/concept.service.js";
-import { pythonBridge } from "./services/python-bridge.js";
-import { initializeDatabase, closeDatabase } from "./db/client.js";
-import { metricsCollector } from "./utils/metrics.js";
+  // --- CRUD Tools ---
 
-// Combine all commands
-const allCommands = {
-  ...saveCommands,
-  ...readCommands,
-  ...convertCommands,
-};
-
-// Additional utility commands
-const utilityCommands = {
-  list_concepts: {
-    description: "List all stored concepts with their available representations",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: async () => {
-      try {
-        const concepts = await conceptService.listAll();
-        const results = await Promise.all(
-          concepts.map(async (c) => ({
-            id: c.id,
-            createdAt: c.createdAt,
-            updatedAt: c.updatedAt,
-            tags: c.tags,
-            representations: {
-              vectors: c.vectorBlob !== null,
-              md: c.mdBlob !== null,
-              thoughtForm: c.thoughtformBlob !== null,
-            },
-          }))
-        );
-        return { success: true, data: { concepts: results, count: results.length } };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-  get_representations: {
-    description: "Check which representations exist for a concept",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", format: "uuid", description: "Concept UUID" },
-      },
-      required: ["id"],
-    },
-    handler: async (input: unknown) => {
-      try {
-        const { id } = input as { id: string };
-        const reps = await conceptService.getRepresentations(id);
-        return { success: true, data: reps };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-  delete_concept: {
-    description: "Delete a concept and all its representations",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", format: "uuid", description: "Concept UUID" },
-      },
-      required: ["id"],
-    },
-    handler: async (input: unknown) => {
-      try {
-        const { id } = input as { id: string };
-        await conceptService.delete(id);
-        return { success: true, data: { deleted: id } };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-  generate_id: {
-    description: "Generate a new UUID for a concept",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: async () => {
-      try {
-        const id = conceptService.generateId();
-        return { success: true, data: { id } };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-  health_check: {
-    description: "Check the health of the server and Python sidecar",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: async () => {
-      try {
-        const pythonHealth = await pythonBridge.getHealth();
-        const circuitStats = pythonBridge.getCircuitBreakerStats();
-        return {
-          success: true,
-          data: {
-            server: "ok",
-            python_sidecar: pythonHealth,
-            circuit_breaker: circuitStats,
-          },
-        };
-      } catch (error) {
-        return {
-          success: true,
-          data: {
-            server: "ok",
-            python_sidecar: {
-              status: "error",
-              error: error instanceof Error ? error.message : "Unknown error",
-            },
-            circuit_breaker: circuitStats,
-          },
-        };
-      }
-    },
-  get_circuit_breaker_stats: {
-    description: "Get circuit breaker statistics",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: async () => {
-      try {
-        const stats = pythonBridge.getCircuitBreakerStats();
-        return { success: true, data: stats };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-  reset_circuit_breaker: {
-    description: "Reset all circuit breakers",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: async () => {
-      try {
-        circuitBreakerManager.resetAll();
-        return { success: true, data: { message: "All circuit breakers reset" } };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-};
-      }
-    },
-  },
-  get_representations: {
-    description: "Check which representations exist for a concept",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", format: "uuid", description: "Concept UUID" },
-      },
-      required: ["id"],
-    },
-    handler: async (input: unknown) => {
-      try {
-        const { id } = input as { id: string };
-        const reps = await conceptService.getRepresentations(id);
-        return { success: true, data: reps };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-  },
-  delete_concept: {
-    description: "Delete a concept and all its representations",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", format: "uuid", description: "Concept UUID" },
-      },
-      required: ["id"],
-    },
-    handler: async (input: unknown) => {
-      try {
-        const { id } = input as { id: string };
-        await conceptService.delete(id);
-        return { success: true, data: { deleted: id } };
-      } catch (error) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Unknown error",
-        };
-      }
-    },
-  },
-  generate_id: {
-    description: "Generate a new UUID for a concept",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: async () => {
-      const id = conceptService.generateId();
-      return { success: true, data: { id } };
-    },
-  },
-  health_check: {
-    description: "Check the health of the server and Python sidecar",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: async () => {
-      try {
-        const pythonHealth = await pythonBridge.getHealth();
-        return {
-          success: true,
-          data: {
-            server: "ok",
-            python_sidecar: pythonHealth,
-          },
-        };
-      } catch (error) {
-        return {
-          success: true,
-          data: {
-            server: "ok",
-            python_sidecar: {
-              status: "error",
-              error: error instanceof Error ? error.message : "Unknown error",
-            },
-          },
-        };
-      }
-    },
-  },
-};
-
-// Merge all commands
-const commands = { ...allCommands, ...utilityCommands };
-
-// Type for command handlers
-type CommandHandler = (input: unknown) => Promise<{ success: boolean; data?: unknown; error?: string }>;
-
-/**
- * Create and configure the MCP server
- */
-export function createServer(): Server {
-  const server = new Server(
+  server.tool(
+    'save_concept',
+    'Create or update a concept with one or more representations (vector, markdown, thoughtform). Tags are merged on update.',
     {
-      name: "politician",
-      version: "1.0.0",
+      id: z.string().uuid().optional().describe('Concept UUID. Auto-generated if omitted.'),
+      markdown: z.string().optional().describe('Markdown text representation'),
+      thoughtform: z.any().optional().describe('ThoughtForm JSON representation'),
+      embedding: z.array(z.number()).optional().describe(`Vector embedding (${VECTOR_DIMENSION} dimensions)`),
+      tags: z.array(z.string()).optional().describe('Tags for the concept (merged on update)'),
     },
-    {
-      capabilities: {
-        tools: {},
-      },
+    async ({ id, markdown, thoughtform, embedding, tags }) => {
+      const result = await conceptService.save({ id, markdown, thoughtform, embedding, tags });
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
     }
   );
 
-  // Handle list_tools request
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools: Tool[] = Object.entries(commands).map(([name, cmd]) => ({
-      name,
-      description: cmd.description,
-      inputSchema: cmd.inputSchema as Tool["inputSchema"],
-    }));
+  server.tool(
+    'read_concept',
+    'Read all available representations for a concept. Optionally filter to specific representations.',
+    {
+      id: z.string().uuid().describe('Concept UUID'),
+      representations: z.array(z.enum(['vector', 'markdown', 'thoughtform'])).optional().describe('Filter to specific representations'),
+    },
+    async ({ id, representations }) => {
+      const result = await conceptService.read(id, representations);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
 
-    return { tools };
-  });
+  server.tool(
+    'delete_concept',
+    'Delete a concept and all its representations.',
+    {
+      id: z.string().uuid().describe('Concept UUID'),
+    },
+    async ({ id }) => {
+      await conceptService.delete(id);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ deleted: id }) }] };
+    }
+  );
 
-  // Handle call_tool request
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
+  server.tool(
+    'list_concepts',
+    'List concepts with pagination and optional tag filtering.',
+    {
+      limit: z.number().int().positive().max(100).optional().describe('Max results (default 50)'),
+      offset: z.number().int().min(0).optional().describe('Pagination offset'),
+      tags: z.array(z.string()).optional().describe('Filter by tags'),
+    },
+    async ({ limit, offset, tags }) => {
+      const result = await conceptService.list({ limit, offset, tags });
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
 
-    const command = commands[name as keyof typeof commands];
+  // --- Search ---
 
-    if (!command) {
+  server.tool(
+    'search_concepts',
+    'Semantic similarity search. Provide a text query (auto-embedded) or a raw vector.',
+    {
+      query: z.string().optional().describe('Text query (will be embedded automatically)'),
+      vector: z.array(z.number()).optional().describe(`Raw vector (${VECTOR_DIMENSION} dimensions)`),
+      k: z.number().int().positive().max(100).optional().describe('Number of results (default 10)'),
+      tags: z.array(z.string()).optional().describe('Filter results by tags'),
+    },
+    async ({ query, vector, k, tags }) => {
+      let queryEmbedding: number[];
+      if (query) {
+        queryEmbedding = await embeddingService.embed(query);
+      } else if (vector) {
+        queryEmbedding = vector;
+      } else {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Provide either query (text) or vector' }) }] };
+      }
+      const results = await conceptService.search(queryEmbedding, k ?? 10, tags);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  // --- Conversion ---
+
+  server.tool(
+    'convert_concept',
+    'Convert a concept from one representation to another. Non-LLM paths: markdown→vector, thoughtform→vector, thoughtform→markdown. LLM paths: markdown→thoughtform, vector→markdown, vector→thoughtform.',
+    {
+      id: z.string().uuid().describe('Concept UUID'),
+      from: z.enum(['vector', 'markdown', 'thoughtform']).describe('Source representation'),
+      to: z.enum(['vector', 'markdown', 'thoughtform']).describe('Target representation'),
+    },
+    async ({ id, from, to }) => {
+      await conversionService.convert(id, from, to);
+      const updated = await conceptService.read(id);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ converted: { from, to }, concept: updated }, null, 2) }] };
+    }
+  );
+
+  // --- Embedding ---
+
+  server.tool(
+    'embed_text',
+    'Generate an embedding vector for arbitrary text without saving it as a concept.',
+    {
+      text: z.string().min(1).describe('Text to embed'),
+    },
+    async ({ text }) => {
+      const embedding = await embeddingService.embed(text);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ dimension: embedding.length, embedding }) }] };
+    }
+  );
+
+  // --- Health & Diagnostics ---
+
+  server.tool(
+    'health_check',
+    'Server status, embedding model status, DB stats, LLM provider status.',
+    {},
+    async () => {
+      const stats = await conceptService.getStats();
+      const embeddingLoaded = await embeddingService.isLoaded();
+      const llmProvider = conversionService.getLLMProviderName();
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ success: false, error: `Unknown tool: ${name}` }),
-          },
-        ],
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            server: 'ok',
+            embedding: {
+              loaded: embeddingLoaded,
+              model: 'Xenova/all-MiniLM-L6-v2',
+              dimension: VECTOR_DIMENSION,
+            },
+            llm: { provider: llmProvider },
+            database: stats,
+          }, null, 2),
+        }],
       };
     }
+  );
 
-    try {
-      const handler = command.handler as CommandHandler;
-      const result = await handler(args);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: false,
-              error: error instanceof Error ? error.message : "Unknown error",
-            }),
-          },
-        ],
-      };
+  server.tool(
+    'get_stats',
+    'Concept count, vector count, representation breakdown.',
+    {},
+    async () => {
+      const stats = await conceptService.getStats();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(stats, null, 2) }] };
     }
-  });
+  );
 
   return server;
-}
-
-/**
- * Start the MCP server
- */
-export async function startServer(): Promise<void> {
-  console.log("Starting Politician MCP Server...");
-
-  // Initialize database
-  initializeDatabase();
-
-  // Start Python sidecar
-  console.log("Starting Python sidecar...");
-  await pythonBridge.start();
-
-  // Create and start MCP server
-  const server = createServer();
-  const transport = new StdioServerTransport();
-
-  // Handle shutdown
-  const shutdown = async () => {
-    console.log("\nShutting down...");
-    await pythonBridge.stop();
-    closeDatabase();
-    process.exit(0);
-  };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  await server.connect(transport);
-  console.log("Politician MCP Server running on stdio");
 }

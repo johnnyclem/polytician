@@ -1,39 +1,35 @@
-/**
- * Database Client
- *
- * Initializes SQLite database with Drizzle ORM.
- * Handles connection, migrations, and provides query interface.
- */
-
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { mkdirSync, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 import * as schema from './schema.js';
+import { getConfig } from '../config.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+let sqlite: DatabaseType | null = null;
+let drizzleDb: ReturnType<typeof drizzle<typeof schema>> | null = null;
 
-// Database path
-const DATA_DIR = join(__dirname, '../../data');
-const DB_PATH = join(DATA_DIR, 'concepts.db');
+export function initializeDatabase(): { db: ReturnType<typeof drizzle<typeof schema>>; sqlite: DatabaseType } {
+  if (sqlite && drizzleDb) {
+    return { db: drizzleDb, sqlite };
+  }
 
-// Ensure data directory exists
-if (!existsSync(DATA_DIR)) {
-  mkdirSync(DATA_DIR, { recursive: true });
-}
+  const config = getConfig();
+  const dbPath = config.dbPath;
 
-// Create SQLite connection with WAL mode for better concurrency
-const sqlite: DatabaseType = new Database(DB_PATH);
-sqlite.pragma('journal_mode = WAL');
-sqlite.pragma('foreign_keys = ON');
+  // Ensure parent directory exists
+  const dir = dirname(dbPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
 
-// Create Drizzle instance
-export const db = drizzle(sqlite, { schema });
+  // Create SQLite connection
+  sqlite = new Database(dbPath);
+  sqlite.pragma('journal_mode = WAL');
+  sqlite.pragma('foreign_keys = ON');
 
-// Initialize schema (create tables if not exist)
-export function initializeDatabase(): void {
-  console.log('Initializing database...');
+  // Load sqlite-vec extension
+  sqliteVec.load(sqlite);
 
   // Create concepts table
   sqlite.exec(`
@@ -42,26 +38,46 @@ export function initializeDatabase(): void {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       tags TEXT DEFAULT '[]',
-      vector_blob BLOB,
-      md_blob TEXT,
-      thoughtform_blob TEXT
+      markdown TEXT,
+      thoughtform TEXT,
+      embedding BLOB
     )
   `);
 
-  // Create indexes
   sqlite.exec(`
-    CREATE INDEX IF NOT EXISTS idx_concepts_created_at ON concepts(created_at);
-    CREATE INDEX IF NOT EXISTS idx_concepts_updated_at ON concepts(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)
   `);
 
-  console.log('Database initialized successfully');
+  // Create sqlite-vec virtual table for vector search
+  sqlite.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS concept_vectors USING vec0(
+      concept_id TEXT PRIMARY KEY,
+      embedding float[384]
+    )
+  `);
+
+  drizzleDb = drizzle(sqlite, { schema });
+  return { db: drizzleDb, sqlite };
 }
 
-// Close database connection
+export function getDatabase(): ReturnType<typeof drizzle<typeof schema>> {
+  if (!drizzleDb) {
+    throw new Error('Database not initialized. Call initializeDatabase() first.');
+  }
+  return drizzleDb;
+}
+
+export function getSqlite(): DatabaseType {
+  if (!sqlite) {
+    throw new Error('Database not initialized. Call initializeDatabase() first.');
+  }
+  return sqlite;
+}
+
 export function closeDatabase(): void {
-  sqlite.close();
-  console.log('Database connection closed');
+  if (sqlite) {
+    sqlite.close();
+    sqlite = null;
+    drizzleDb = null;
+  }
 }
-
-// Export raw sqlite for advanced operations
-export { sqlite };
