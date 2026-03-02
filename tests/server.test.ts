@@ -79,6 +79,7 @@ describe('MCP Server — Tool integration', () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     expect(names).toEqual([
+      'batch_save_concepts',
       'convert_concept',
       'delete_concept',
       'embed_text',
@@ -265,6 +266,44 @@ describe('MCP Server — Tool integration', () => {
       total: number;
     };
     expect(page2.concepts).toHaveLength(1);
+  });
+
+  // --- batch_save_concepts ---
+
+  it('should batch save multiple concepts via MCP tool', async () => {
+    const result = await callTool('batch_save_concepts', {
+      concepts: [
+        { markdown: '# Batch One', tags: ['batch-mcp'] },
+        { markdown: '# Batch Two', tags: ['batch-mcp'] },
+        { markdown: '# Batch Three', tags: ['batch-mcp'] },
+      ],
+    }) as { count: number; ids: string[] };
+
+    expect(result.count).toBe(3);
+    expect(result.ids).toHaveLength(3);
+
+    const list = await callTool('list_concepts', { tags: ['batch-mcp'] }) as { total: number };
+    expect(list.total).toBe(3);
+  });
+
+  it('should batch save with auto-embed via MCP tool', async () => {
+    const result = await callTool('batch_save_concepts', {
+      concepts: [
+        { markdown: '# Auto embed one' },
+        { markdown: '# Auto embed two' },
+      ],
+      autoEmbed: true,
+    }) as { count: number; ids: string[] };
+
+    expect(result.count).toBe(2);
+
+    // Verify embeddings were generated
+    for (const id of result.ids) {
+      const concept = await callTool('read_concept', { id, representations: ['vector'] }) as {
+        embedding: number[];
+      };
+      expect(concept.embedding).toHaveLength(VECTOR_DIMENSION);
+    }
   });
 
   // --- get_stats ---

@@ -68,6 +68,46 @@ export function createServer(): McpServer {
     }
   );
 
+  server.tool(
+    'batch_save_concepts',
+    'Bulk create or update concepts. Processes embedding generation in batches and defers vector index updates until batch completion for improved throughput.',
+    {
+      concepts: z.array(z.object({
+        id: z.string().uuid().optional().describe('Concept UUID. Auto-generated if omitted.'),
+        markdown: z.string().optional().describe('Markdown text representation'),
+        thoughtform: z.any().optional().describe('ThoughtForm JSON representation'),
+        embedding: z.array(z.number()).optional().describe(`Vector embedding (${VECTOR_DIMENSION} dimensions)`),
+        tags: z.array(z.string()).optional().describe('Tags for the concept'),
+      })).min(1).describe('Array of concepts to save'),
+      autoEmbed: z.boolean().optional().describe('Auto-generate embeddings from markdown for entries that lack an embedding (default false)'),
+      batchSize: z.number().int().positive().optional().describe('Batch size for processing (default 50)'),
+    },
+    async ({ concepts: entries, autoEmbed, batchSize }) => {
+      // Auto-embed markdown entries if requested
+      if (autoEmbed) {
+        const needsEmbedding = entries.filter(e => e.markdown && !e.embedding);
+        if (needsEmbedding.length > 0) {
+          const texts = needsEmbedding.map(e => e.markdown!);
+          const embeddings = await embeddingService.embedBatch(texts, batchSize ?? 50);
+          needsEmbedding.forEach((entry, i) => {
+            entry.embedding = embeddings[i];
+          });
+        }
+      }
+
+      const result = await conceptService.saveBatch(entries, { batchSize });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            count: result.count,
+            ids: result.saved.map(c => c.id),
+          }, null, 2),
+        }],
+      };
+    }
+  );
+
   // --- Search ---
 
   server.tool(

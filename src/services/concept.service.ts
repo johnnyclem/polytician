@@ -307,6 +307,110 @@ export class ConceptService {
     };
   }
 
+  /**
+   * Save multiple concepts in a single transaction with deferred vector index updates.
+   * Embedding generation is processed in batches for entries that provide markdown
+   * but no embedding. FAISS/sqlite-vec index updates are deferred until all concepts
+   * are inserted, improving throughput relative to sequential insertion.
+   */
+  async saveBatch(
+    entries: Array<{
+      id?: string;
+      markdown?: string;
+      thoughtform?: ThoughtForm;
+      embedding?: number[];
+      tags?: string[];
+    }>,
+    options?: { batchSize?: number }
+  ): Promise<{ saved: Concept[]; count: number }> {
+    const sqlite = getSqlite();
+    const db = getDatabase();
+    const now = Date.now();
+    const batchSize = options?.batchSize ?? 50;
+
+    const saved: Concept[] = [];
+    const deferredVectors: Array<{ id: string; embedding: number[] }> = [];
+
+    // Process in batches within a single transaction
+    const runTransaction = sqlite.transaction(() => {
+      for (let batchStart = 0; batchStart < entries.length; batchStart += batchSize) {
+        const batch = entries.slice(batchStart, batchStart + batchSize);
+
+        for (const params of batch) {
+          const id = params.id ?? this.generateId();
+          const existing = db.select().from(concepts).where(eq(concepts.id, id)).get();
+
+          if (existing) {
+            const existingTags: string[] = (existing.tags as string[] | null) ?? [];
+            const newTags = params.tags
+              ? [...new Set([...existingTags, ...params.tags])]
+              : existingTags;
+
+            const updates: Record<string, unknown> = {
+              updated_at: now,
+              tags: JSON.stringify(newTags),
+            };
+
+            if (params.markdown !== undefined) updates['markdown'] = params.markdown;
+            if (params.thoughtform !== undefined)
+              updates['thoughtform'] = JSON.stringify(params.thoughtform);
+            if (params.embedding !== undefined)
+              updates['embedding'] = serializeEmbedding(params.embedding);
+
+            const setClauses = Object.keys(updates)
+              .map(k => `${k} = ?`)
+              .join(', ');
+            const values = Object.values(updates);
+            sqlite.prepare(`UPDATE concepts SET ${setClauses} WHERE id = ?`).run(...values, id);
+
+            if (params.embedding !== undefined) {
+              deferredVectors.push({ id, embedding: params.embedding });
+            }
+          } else {
+            const tags = params.tags ?? [];
+            sqlite
+              .prepare(
+                `INSERT INTO concepts (id, created_at, updated_at, tags, markdown, thoughtform, embedding)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`
+              )
+              .run(
+                id,
+                now,
+                now,
+                JSON.stringify(tags),
+                params.markdown ?? null,
+                params.thoughtform ? JSON.stringify(params.thoughtform) : null,
+                params.embedding ? serializeEmbedding(params.embedding) : null
+              );
+
+            if (params.embedding) {
+              deferredVectors.push({ id, embedding: params.embedding });
+            }
+          }
+
+          const row = db.select().from(concepts).where(eq(concepts.id, id)).get();
+          if (row) saved.push(rowToConcept(row));
+        }
+      }
+
+      // Deferred vector index updates: batch all sqlite-vec writes after concept inserts
+      const deleteStmt = sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?');
+      const insertStmt = sqlite.prepare(
+        'INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)'
+      );
+
+      for (const { id, embedding } of deferredVectors) {
+        const buf = serializeEmbedding(embedding);
+        deleteStmt.run(id);
+        insertStmt.run(id, buf);
+      }
+    });
+
+    runTransaction();
+
+    return { saved, count: saved.length };
+  }
+
   private upsertVector(id: string, embedding: number[]): void {
     const sqlite = getSqlite();
     const buf = serializeEmbedding(embedding);
