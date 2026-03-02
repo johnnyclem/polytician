@@ -17,9 +17,12 @@ async function loadModel(): Promise<void> {
     const config = getConfig();
     env.cacheDir = config.modelsDir;
 
-    pipelineFn = await pipeline('feature-extraction', config.embeddingModel, {
+    pipelineFn = (await pipeline('feature-extraction', config.embeddingModel, {
       quantized: true,
-    }) as unknown as (text: string, options?: Record<string, unknown>) => Promise<{ data: Float32Array }>;
+    })) as unknown as (
+      text: string,
+      options?: Record<string, unknown>
+    ) => Promise<{ data: Float32Array }>;
   })();
 
   await loading;

@@ -527,7 +527,9 @@ export class ConceptService {
 
     // Delete existing if present, then insert
     sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
-    sqlite.prepare('INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)').run(id, buf);
+    sqlite
+      .prepare('INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)')
+      .run(id, buf);
   }
 }
 
