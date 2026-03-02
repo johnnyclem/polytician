@@ -1,9 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { v4 as uuidv4 } from 'uuid';
 import { conceptService } from './services/concept.service.js';
 import { conversionService } from './services/conversion.service.js';
 import { embeddingService } from './services/embedding.service.js';
 import { VECTOR_DIMENSION } from './types/concept.js';
+import { withRequestLogging } from './logger.js';
 import { VersionConflictError } from './errors/index.js';
 
 export function createServer(): McpServer {
@@ -57,8 +59,10 @@ export function createServer(): McpServer {
       representations: z.array(z.enum(['vector', 'markdown', 'thoughtform'])).optional().describe('Filter to specific representations'),
     },
     async ({ id, representations }) => {
-      const result = await conceptService.read(id, representations);
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+      return withRequestLogging('read_concept', uuidv4(), async () => {
+        const result = await conceptService.read(id, representations);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+      });
     }
   );
 
@@ -69,8 +73,10 @@ export function createServer(): McpServer {
       id: z.string().uuid().describe('Concept UUID'),
     },
     async ({ id }) => {
-      await conceptService.delete(id);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ deleted: id }) }] };
+      return withRequestLogging('delete_concept', uuidv4(), async () => {
+        await conceptService.delete(id);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ deleted: id }) }] };
+      });
     }
   );
 
@@ -167,9 +173,11 @@ export function createServer(): McpServer {
       to: z.enum(['vector', 'markdown', 'thoughtform']).describe('Target representation'),
     },
     async ({ id, from, to }) => {
-      await conversionService.convert(id, from, to);
-      const updated = await conceptService.read(id);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ converted: { from, to }, concept: updated }, null, 2) }] };
+      return withRequestLogging('convert_concept', uuidv4(), async () => {
+        await conversionService.convert(id, from, to);
+        const updated = await conceptService.read(id);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ converted: { from, to }, concept: updated }, null, 2) }] };
+      });
     }
   );
 
@@ -182,8 +190,10 @@ export function createServer(): McpServer {
       text: z.string().min(1).describe('Text to embed'),
     },
     async ({ text }) => {
-      const embedding = await embeddingService.embed(text);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ dimension: embedding.length, embedding }) }] };
+      return withRequestLogging('embed_text', uuidv4(), async () => {
+        const embedding = await embeddingService.embed(text);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ dimension: embedding.length, embedding }) }] };
+      });
     }
   );
 
