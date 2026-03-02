@@ -35,6 +35,8 @@ export function initializeDatabase(overrideDbPath?: string): { db: ReturnType<ty
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS concepts (
       id TEXT PRIMARY KEY,
+      namespace TEXT NOT NULL DEFAULT 'default',
+      version INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       tags TEXT DEFAULT '[]',
@@ -46,6 +48,10 @@ export function initializeDatabase(overrideDbPath?: string): { db: ReturnType<ty
 
   sqlite.exec(`
     CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)
+  `);
+
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_concepts_namespace ON concepts(namespace)
   `);
 
   // Create sqlite-vec virtual table for vector search
