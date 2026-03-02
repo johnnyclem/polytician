@@ -73,10 +73,14 @@ export class ConceptService {
       };
 
       if (params.markdown !== undefined) updates['markdown'] = params.markdown;
-      if (params.thoughtform !== undefined) updates['thoughtform'] = JSON.stringify(params.thoughtform);
-      if (params.embedding !== undefined) updates['embedding'] = serializeEmbedding(params.embedding);
+      if (params.thoughtform !== undefined)
+        updates['thoughtform'] = JSON.stringify(params.thoughtform);
+      if (params.embedding !== undefined)
+        updates['embedding'] = serializeEmbedding(params.embedding);
 
-      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+      const setClauses = Object.keys(updates)
+        .map(k => `${k} = ?`)
+        .join(', ');
       const values = Object.values(updates);
 
       sqlite.prepare(`UPDATE concepts SET ${setClauses} WHERE id = ?`).run(...values, id);
@@ -141,9 +145,12 @@ export class ConceptService {
       updatedAt: full.updatedAt,
       tags: full.tags,
     };
-    if (representations.includes('markdown') && full.markdown !== null) result.markdown = full.markdown;
-    if (representations.includes('thoughtform') && full.thoughtform !== null) result.thoughtform = full.thoughtform;
-    if (representations.includes('vector') && full.embedding !== null) result.embedding = full.embedding;
+    if (representations.includes('markdown') && full.markdown !== null)
+      result.markdown = full.markdown;
+    if (representations.includes('thoughtform') && full.thoughtform !== null)
+      result.thoughtform = full.thoughtform;
+    if (representations.includes('vector') && full.embedding !== null)
+      result.embedding = full.embedding;
     return result;
   }
 
@@ -183,18 +190,22 @@ export class ConceptService {
       }
     }
 
-    const countResult = sqlite.prepare(`SELECT COUNT(*) as count FROM concepts ${where}`).get(...queryParams) as { count: number };
+    const countResult = sqlite
+      .prepare(`SELECT COUNT(*) as count FROM concepts ${where}`)
+      .get(...queryParams) as { count: number };
     const rows = sqlite
-      .prepare(`SELECT id, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
+      .prepare(
+        `SELECT id, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+      )
       .all(...queryParams, limit, offset) as Array<{
-        id: string;
-        created_at: number;
-        updated_at: number;
-        tags: string;
-        has_md: number;
-        has_tf: number;
-        has_vec: number;
-      }>;
+      id: string;
+      created_at: number;
+      updated_at: number;
+      tags: string;
+      has_md: number;
+      has_tf: number;
+      has_vec: number;
+    }>;
 
     return {
       concepts: rows.map(r => ({
@@ -212,17 +223,25 @@ export class ConceptService {
     };
   }
 
-  async search(queryEmbedding: number[], k: number = 10, tags?: string[]): Promise<Array<{
-    id: string;
-    distance: number;
-    tags: string[];
-    representations: ConceptRepresentations;
-  }>> {
+  async search(
+    queryEmbedding: number[],
+    k: number = 10,
+    tags?: string[]
+  ): Promise<
+    Array<{
+      id: string;
+      distance: number;
+      tags: string[];
+      representations: ConceptRepresentations;
+    }>
+  > {
     const sqlite = getSqlite();
     const queryBuf = serializeEmbedding(queryEmbedding);
 
     const vecResults = sqlite
-      .prepare('SELECT concept_id, distance FROM concept_vectors WHERE embedding MATCH ? AND k = ? ORDER BY distance')
+      .prepare(
+        'SELECT concept_id, distance FROM concept_vectors WHERE embedding MATCH ? AND k = ? ORDER BY distance'
+      )
       .all(queryBuf, k) as Array<{ concept_id: string; distance: number }>;
 
     if (vecResults.length === 0) return [];
@@ -236,12 +255,12 @@ export class ConceptService {
          FROM concepts WHERE id IN (${placeholders})`
       )
       .all(...ids) as Array<{
-        id: string;
-        tags: string;
-        has_md: number;
-        has_tf: number;
-        has_vec: number;
-      }>;
+      id: string;
+      tags: string;
+      has_md: number;
+      has_tf: number;
+      has_vec: number;
+    }>;
 
     const conceptMap = new Map(conceptRows.map(r => [r.id, r]));
 
@@ -275,11 +294,27 @@ export class ConceptService {
   }> {
     const sqlite = getSqlite();
 
-    const conceptCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts').get() as { count: number }).count;
-    const vectorCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concept_vectors').get() as { count: number }).count;
-    const mdCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL').get() as { count: number }).count;
-    const tfCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL').get() as { count: number }).count;
-    const vecCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL').get() as { count: number }).count;
+    const conceptCount = (
+      sqlite.prepare('SELECT COUNT(*) as count FROM concepts').get() as { count: number }
+    ).count;
+    const vectorCount = (
+      sqlite.prepare('SELECT COUNT(*) as count FROM concept_vectors').get() as { count: number }
+    ).count;
+    const mdCount = (
+      sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL').get() as {
+        count: number;
+      }
+    ).count;
+    const tfCount = (
+      sqlite
+        .prepare('SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL')
+        .get() as { count: number }
+    ).count;
+    const vecCount = (
+      sqlite
+        .prepare('SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL')
+        .get() as { count: number }
+    ).count;
 
     return {
       conceptCount,
@@ -298,7 +333,9 @@ export class ConceptService {
 
     // Delete existing if present, then insert
     sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
-    sqlite.prepare('INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)').run(id, buf);
+    sqlite
+      .prepare('INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)')
+      .run(id, buf);
   }
 }
 
