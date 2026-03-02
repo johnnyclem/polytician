@@ -2,11 +2,11 @@
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.js';
-import { initializeDatabase, closeDatabase } from './db/client.js';
+import { initializeDatabaseAsync, closeDatabase } from './db/client.js';
 
 async function main(): Promise<void> {
-  // Initialize database (creates tables, loads sqlite-vec)
-  initializeDatabase();
+  // Initialize database (SQLite or PostgreSQL based on config)
+  await initializeDatabaseAsync();
 
   // Create MCP server with all tools registered
   const server = createServer();
@@ -17,8 +17,7 @@ async function main(): Promise<void> {
 
   // Graceful shutdown
   const shutdown = (): void => {
-    closeDatabase();
-    process.exit(0);
+    Promise.resolve(closeDatabase()).finally(() => process.exit(0));
   };
 
   process.on('SIGINT', shutdown);
