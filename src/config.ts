@@ -8,6 +8,7 @@ export interface LLMConfig {
   apiKey?: string;
 }
 
+export type DbBackend = 'sqlite' | 'postgres';
 /**
  * Configuration for distributed / multi-node deployments.
  *
@@ -46,6 +47,8 @@ export interface DistributedConfig {
 export interface PolyticianConfig {
   dataDir: string;
   dbPath: string;
+  dbBackend: DbBackend;
+  postgresUrl: string;
   modelsDir: string;
   embeddingModel: string;
   llm: LLMConfig;
@@ -97,6 +100,10 @@ export function getConfig(): PolyticianConfig {
   cachedConfig = {
     dataDir,
     dbPath: join(dataDir, 'concepts.db'),
+    dbBackend: (process.env['POLYTICIAN_DB_BACKEND'] as DbBackend) ??
+      (fileConfig as Record<string, unknown>).dbBackend ?? 'sqlite',
+    postgresUrl: process.env['POLYTICIAN_POSTGRES_URL'] ??
+      (fileConfig as Record<string, unknown>).postgresUrl as string ?? '',
     modelsDir: join(dataDir, 'models'),
     embeddingModel: process.env['POLYTICIAN_EMBEDDING_MODEL'] ?? fileConfig.embeddingModel ?? 'Xenova/all-MiniLM-L6-v2',
     llm: {

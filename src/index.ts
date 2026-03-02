@@ -2,6 +2,11 @@
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.js';
+import { initializeDatabaseAsync, closeDatabase } from './db/client.js';
+
+async function main(): Promise<void> {
+  // Initialize database (SQLite or PostgreSQL based on config)
+  await initializeDatabaseAsync();
 import { initializeDatabase, closeDatabase } from './db/client.js';
 import { startHealthServer } from './health.js';
 import { logger } from './logger.js';
@@ -33,6 +38,7 @@ async function main(): Promise<void> {
 
   // Graceful shutdown
   const shutdown = (): void => {
+    Promise.resolve(closeDatabase()).finally(() => process.exit(0));
     logger.info('shutdown initiated');
     healthServer.close();
     indexSyncService.stop();

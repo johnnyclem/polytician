@@ -1,9 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
-import { eq } from 'drizzle-orm';
-import { getDatabase, getSqlite } from '../db/client.js';
-import { concepts } from '../db/schema.js';
+import { getAdapter } from '../db/client.js';
+import type { ConceptRow } from '../db/adapter.js';
 import type { Concept, ConceptRepresentations } from '../types/concept.js';
-import { VECTOR_DIMENSION } from '../types/concept.js';
 import type { ThoughtForm } from '../types/thoughtform.js';
 import { VersionConflictError } from '../errors/index.js';
 import { conceptEventBus } from '../events/concept-events.js';
@@ -24,6 +22,12 @@ function parseThoughtForm(raw: string | null): ThoughtForm | null {
   return JSON.parse(raw) as ThoughtForm;
 }
 
+function rowToConcept(row: ConceptRow): Concept {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    tags: JSON.parse(row.tags) as string[],
 function rowToConcept(row: {
   id: string;
   namespace: string;
@@ -62,14 +66,13 @@ export class ConceptService {
     embedding?: number[];
     tags?: string[];
   }): Promise<Concept> {
-    const db = getDatabase();
-    const sqlite = getSqlite();
+    const adapter = getAdapter();
     const now = Date.now();
     const id = params.id ?? this.generateId();
     const namespace = params.namespace ?? 'default';
 
     // Check if concept exists
-    const existing = db.select().from(concepts).where(eq(concepts.id, id)).get();
+    const existing = await adapter.findConcept(id);
 
     if (existing) {
       // Optimistic concurrency control
@@ -80,7 +83,7 @@ export class ConceptService {
       const newVersion = existing.version + 1;
 
       // Merge: only overwrite fields that are explicitly provided
-      const existingTags: string[] = (existing.tags as string[] | null) ?? [];
+      const existingTags: string[] = JSON.parse(existing.tags) as string[];
       const newTags = params.tags ? [...new Set([...existingTags, ...params.tags])] : existingTags;
 
       const updates: Record<string, unknown> = {
@@ -90,17 +93,16 @@ export class ConceptService {
       };
 
       if (params.markdown !== undefined) updates['markdown'] = params.markdown;
-      if (params.thoughtform !== undefined) updates['thoughtform'] = JSON.stringify(params.thoughtform);
-      if (params.embedding !== undefined) updates['embedding'] = serializeEmbedding(params.embedding);
+      if (params.thoughtform !== undefined)
+        updates['thoughtform'] = JSON.stringify(params.thoughtform);
+      if (params.embedding !== undefined)
+        updates['embedding'] = serializeEmbedding(params.embedding);
 
-      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-      const values = Object.values(updates);
+      await adapter.updateConcept(id, updates);
 
-      sqlite.prepare(`UPDATE concepts SET ${setClauses} WHERE id = ?`).run(...values, id);
-
-      // Sync sqlite-vec
+      // Sync vector index
       if (params.embedding !== undefined) {
-        this.upsertVector(id, params.embedding);
+        await adapter.upsertVector(id, serializeEmbedding(params.embedding));
       }
 
       conceptEventBus.emit('concept.updated', {
@@ -110,6 +112,19 @@ export class ConceptService {
       });
     } else {
       const tags = params.tags ?? [];
+      const row: ConceptRow = {
+        id,
+        created_at: now,
+        updated_at: now,
+        tags: JSON.stringify(tags),
+        markdown: params.markdown ?? null,
+        thoughtform: params.thoughtform ? JSON.stringify(params.thoughtform) : null,
+        embedding: params.embedding ? serializeEmbedding(params.embedding) : null,
+      };
+
+      await adapter.insertConcept(row);
+
+      // Sync vector index
       sqlite
         .prepare(
           `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding)
@@ -129,7 +144,7 @@ export class ConceptService {
 
       // Sync sqlite-vec
       if (params.embedding) {
-        this.upsertVector(id, params.embedding);
+        await adapter.upsertVector(id, serializeEmbedding(params.embedding));
       }
 
       conceptEventBus.emit('concept.created', {
@@ -139,14 +154,14 @@ export class ConceptService {
       });
     }
 
-    const saved = db.select().from(concepts).where(eq(concepts.id, id)).get();
+    const saved = await adapter.findConcept(id);
     if (!saved) throw new Error(`Failed to save concept ${id}`);
     return rowToConcept(saved);
   }
 
   async read(id: string, representations?: string[]): Promise<Partial<Concept> & { id: string }> {
-    const db = getDatabase();
-    const row = db.select().from(concepts).where(eq(concepts.id, id)).get();
+    const adapter = getAdapter();
+    const row = await adapter.findConcept(id);
     if (!row) throw new Error(`Concept '${id}' not found`);
 
     const full = rowToConcept(row);
@@ -176,18 +191,22 @@ export class ConceptService {
       updatedAt: full.updatedAt,
       tags: full.tags,
     };
-    if (representations.includes('markdown') && full.markdown !== null) result.markdown = full.markdown;
-    if (representations.includes('thoughtform') && full.thoughtform !== null) result.thoughtform = full.thoughtform;
-    if (representations.includes('vector') && full.embedding !== null) result.embedding = full.embedding;
+    if (representations.includes('markdown') && full.markdown !== null)
+      result.markdown = full.markdown;
+    if (representations.includes('thoughtform') && full.thoughtform !== null)
+      result.thoughtform = full.thoughtform;
+    if (representations.includes('vector') && full.embedding !== null)
+      result.embedding = full.embedding;
     return result;
   }
 
   async delete(id: string): Promise<void> {
-    const db = getDatabase();
-    const sqlite = getSqlite();
-    const row = db.select().from(concepts).where(eq(concepts.id, id)).get();
+    const adapter = getAdapter();
+    const row = await adapter.findConcept(id);
     if (!row) throw new Error(`Concept '${id}' not found`);
 
+    await adapter.deleteVector(id);
+    await adapter.deleteConcept(id);
     sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
     db.delete(concepts).where(eq(concepts.id, id)).run();
 
@@ -206,11 +225,16 @@ export class ConceptService {
     }>;
     total: number;
   }> {
-    const sqlite = getSqlite();
+    const adapter = getAdapter();
     const limit = params?.limit ?? 50;
     const offset = params?.offset ?? 0;
     const namespace = params?.namespace ?? 'default';
 
+    const { rows, total } = await adapter.listConcepts({
+      limit,
+      offset,
+      tags: params?.tags,
+    });
     // Build query
     const conditions: string[] = ['namespace = ?'];
     const queryParams: unknown[] = [namespace];
@@ -240,7 +264,7 @@ export class ConceptService {
       }>;
 
     return {
-      concepts: rows.map(r => ({
+      concepts: rows.map((r) => ({
         id: r.id,
         namespace: r.namespace,
         version: r.version,
@@ -253,10 +277,23 @@ export class ConceptService {
           thoughtform: r.has_tf === 1,
         },
       })),
-      total: countResult.count,
+      total,
     };
   }
 
+  async search(
+    queryEmbedding: number[],
+    k: number = 10,
+    tags?: string[],
+  ): Promise<
+    Array<{
+      id: string;
+      distance: number;
+      tags: string[];
+      representations: ConceptRepresentations;
+    }>
+  > {
+    const adapter = getAdapter();
   async search(queryEmbedding: number[], k: number = 10, tags?: string[], options?: {
     namespace?: string;
     crossNamespace?: boolean;
@@ -272,6 +309,7 @@ export class ConceptService {
     const namespace = options?.namespace ?? 'default';
     const crossNamespace = options?.crossNamespace ?? false;
 
+    const vecResults = await adapter.vectorSearch(queryBuf, k);
     const vecResults = sqlite
       .prepare('SELECT concept_id, distance FROM concept_vectors WHERE embedding MATCH ? AND k = ? ORDER BY distance')
       .all(queryBuf, k * (crossNamespace ? 1 : 3)) as Array<{ concept_id: string; distance: number }>;
@@ -279,6 +317,24 @@ export class ConceptService {
     if (vecResults.length === 0) return [];
 
     // Fetch concept metadata for results
+    const ids = vecResults.map((r) => r.concept_id);
+    const conceptRows = await adapter.findConceptMeta(ids);
+    const conceptMap = new Map(conceptRows.map((r) => [r.id, r]));
+
+    let results = vecResults.map((vr) => {
+      const cr = conceptMap.get(vr.concept_id);
+      const parsedTags = cr ? (JSON.parse(cr.tags) as string[]) : [];
+      return {
+        id: vr.concept_id,
+        distance: vr.distance,
+        tags: parsedTags,
+        representations: {
+          vector: cr ? cr.has_vec === 1 : false,
+          markdown: cr ? cr.has_md === 1 : false,
+          thoughtform: cr ? cr.has_tf === 1 : false,
+        },
+      };
+    });
     const ids = vecResults.map(r => r.concept_id);
     const placeholders = ids.map(() => '?').join(',');
 
@@ -325,7 +381,7 @@ export class ConceptService {
 
     // Filter by tags if specified
     if (tags && tags.length > 0) {
-      results = results.filter(r => tags.every(t => r.tags.includes(t)));
+      results = results.filter((r) => tags.every((t) => r.tags.includes(t)));
     }
 
     // Limit to k results after namespace filtering
@@ -337,6 +393,8 @@ export class ConceptService {
     vectorCount: number;
     representationCounts: { markdown: number; thoughtform: number; vector: number };
   }> {
+    const adapter = getAdapter();
+    const stats = await adapter.getStats();
     const sqlite = getSqlite();
     const ns = namespace ?? 'default';
 
@@ -349,12 +407,12 @@ export class ConceptService {
     const vecCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE namespace = ? AND embedding IS NOT NULL').get(ns) as { count: number }).count;
 
     return {
-      conceptCount,
-      vectorCount,
+      conceptCount: stats.conceptCount,
+      vectorCount: stats.vectorCount,
       representationCounts: {
-        markdown: mdCount,
-        thoughtform: tfCount,
-        vector: vecCount,
+        markdown: stats.mdCount,
+        thoughtform: stats.tfCount,
+        vector: stats.vecCount,
       },
     };
   }

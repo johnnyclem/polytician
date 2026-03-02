@@ -1,36 +1,40 @@
-import Database, { type Database as DatabaseType } from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
-import * as schema from './schema.js';
+import type { DatabaseAdapter } from './adapter.js';
+import { SqliteAdapter } from './sqlite-adapter.js';
 import { getConfig } from '../config.js';
 
-let sqlite: DatabaseType | null = null;
-let drizzleDb: ReturnType<typeof drizzle<typeof schema>> | null = null;
+let adapter: DatabaseAdapter | null = null;
 
-export function initializeDatabase(overrideDbPath?: string): { db: ReturnType<typeof drizzle<typeof schema>>; sqlite: DatabaseType } {
-  if (sqlite && drizzleDb) {
-    return { db: drizzleDb, sqlite };
-  }
+/**
+ * Initialize the database using the configured backend (sqlite or postgres).
+ *
+ * For SQLite (default): provide an optional dbPath override.
+ * For PostgreSQL: configure via POLYTICIAN_DB_BACKEND=postgres and POLYTICIAN_POSTGRES_URL.
+ */
+export function initializeDatabase(overrideDbPath?: string): DatabaseAdapter {
+  if (adapter) return adapter;
 
   const config = getConfig();
-  const dbPath = overrideDbPath ?? config.dbPath;
 
-  // Ensure parent directory exists
-  const dir = dirname(dbPath);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+  if (config.dbBackend === 'postgres') {
+    throw new Error(
+      'PostgreSQL backend requires async initialization. Use initializeDatabaseAsync() instead.',
+    );
   }
 
-  // Create SQLite connection
-  sqlite = new Database(dbPath);
-  sqlite.pragma('journal_mode = WAL');
-  sqlite.pragma('foreign_keys = ON');
+  const dbPath = overrideDbPath ?? config.dbPath;
+  const sqliteAdapter = new SqliteAdapter(dbPath);
+  sqliteAdapter.initialize();
+  adapter = sqliteAdapter;
+  return adapter;
+}
 
-  // Load sqlite-vec extension
-  sqliteVec.load(sqlite);
-
+/**
+ * Async initialization — required for PostgreSQL, also works for SQLite.
+ */
+export async function initializeDatabaseAsync(
+  overrideDbPath?: string,
+): Promise<DatabaseAdapter> {
+  if (adapter) return adapter;
   // Create concepts table
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS concepts (
@@ -46,10 +50,15 @@ export function initializeDatabase(overrideDbPath?: string): { db: ReturnType<ty
     )
   `);
 
-  sqlite.exec(`
-    CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)
-  `);
+  const config = getConfig();
 
+  if (config.dbBackend === 'postgres') {
+    const { PostgresAdapter } = await import('./postgres-adapter.js');
+    const pgAdapter = new PostgresAdapter(config.postgresUrl);
+    await pgAdapter.initialize();
+    adapter = pgAdapter;
+    return adapter;
+  }
   sqlite.exec(`
     CREATE INDEX IF NOT EXISTS idx_concepts_namespace ON concepts(namespace)
   `);
@@ -62,28 +71,26 @@ export function initializeDatabase(overrideDbPath?: string): { db: ReturnType<ty
     )
   `);
 
-  drizzleDb = drizzle(sqlite, { schema });
-  return { db: drizzleDb, sqlite };
+  // SQLite path (synchronous internally)
+  return initializeDatabase(overrideDbPath);
 }
 
-export function getDatabase(): ReturnType<typeof drizzle<typeof schema>> {
-  if (!drizzleDb) {
+export function getAdapter(): DatabaseAdapter {
+  if (!adapter) {
     throw new Error('Database not initialized. Call initializeDatabase() first.');
   }
-  return drizzleDb;
+  return adapter;
 }
 
-export function getSqlite(): DatabaseType {
-  if (!sqlite) {
-    throw new Error('Database not initialized. Call initializeDatabase() first.');
+export function closeDatabase(): void | Promise<void> {
+  if (adapter) {
+    const result = adapter.close();
+    adapter = null;
+    return result;
   }
-  return sqlite;
 }
 
-export function closeDatabase(): void {
-  if (sqlite) {
-    sqlite.close();
-    sqlite = null;
-    drizzleDb = null;
-  }
+/** Reset the singleton — used by tests. */
+export function resetAdapter(): void {
+  adapter = null;
 }
