@@ -1,18 +1,31 @@
-/**
- * Politician MCP Server
- *
- * A local AI agent that stores concepts in three representations:
- * - Vectors (768-dim embeddings via sentence-transformers)
- * - Markdown (human-readable text)
- * - ThoughtForm (structured JSON with entities, relationships, context graph)
- *
- * Provides 12 commands for CRUD and conversion operations.
- */
+#!/usr/bin/env node
 
-import { startServer } from "./server.js";
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createServer } from './server.js';
+import { initializeDatabase, closeDatabase } from './db/client.js';
 
-// Start the MCP server
-startServer().catch((error) => {
-  console.error("Failed to start server:", error);
+async function main(): Promise<void> {
+  // Initialize database (creates tables, loads sqlite-vec)
+  initializeDatabase();
+
+  // Create MCP server with all tools registered
+  const server = createServer();
+
+  // Connect via stdio transport
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+
+  // Graceful shutdown
+  const shutdown = (): void => {
+    closeDatabase();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+main().catch((error) => {
+  console.error('Failed to start Polytician:', error);
   process.exit(1);
 });
