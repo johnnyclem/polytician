@@ -8,19 +8,26 @@ export interface LLMConfig {
   apiKey?: string;
 }
 
+export interface NLPConfig {
+  pipeline: 'rule-based' | 'llm' | 'none';
+  entityTypes?: string[];
+  minConfidence?: number;
+}
+
 export interface PolyticianConfig {
   dataDir: string;
   dbPath: string;
   modelsDir: string;
   embeddingModel: string;
   llm: LLMConfig;
+  nlp: NLPConfig;
 }
 
 const DEFAULT_DATA_DIR = join(homedir(), '.polytician');
 
 let cachedConfig: PolyticianConfig | null = null;
 
-function loadConfigFile(): Partial<PolyticianConfig> & { llm?: Partial<LLMConfig> } {
+function loadConfigFile(): Partial<PolyticianConfig> & { llm?: Partial<LLMConfig>; nlp?: Partial<NLPConfig> } {
   const paths = [
     join(process.cwd(), '.polytician.json'),
     join(homedir(), '.polytician.json'),
@@ -30,7 +37,7 @@ function loadConfigFile(): Partial<PolyticianConfig> & { llm?: Partial<LLMConfig
     if (existsSync(path)) {
       try {
         const raw = readFileSync(path, 'utf-8');
-        return JSON.parse(raw) as Partial<PolyticianConfig> & { llm?: Partial<LLMConfig> };
+        return JSON.parse(raw) as Partial<PolyticianConfig> & { llm?: Partial<LLMConfig>; nlp?: Partial<NLPConfig> };
       } catch {
         // Ignore parse errors, use defaults
       }
@@ -61,6 +68,11 @@ export function getConfig(): PolyticianConfig {
       provider: (process.env['POLYTICIAN_LLM_PROVIDER'] as LLMConfig['provider']) ?? fileConfig.llm?.provider ?? 'none',
       model: process.env['POLYTICIAN_LLM_MODEL'] ?? fileConfig.llm?.model,
       apiKey: resolveEnvVar(process.env['POLYTICIAN_LLM_API_KEY'] ?? fileConfig.llm?.apiKey),
+    },
+    nlp: {
+      pipeline: (process.env['POLYTICIAN_NLP_PIPELINE'] as NLPConfig['pipeline']) ?? fileConfig.nlp?.pipeline ?? 'none',
+      entityTypes: fileConfig.nlp?.entityTypes,
+      minConfidence: fileConfig.nlp?.minConfidence,
     },
   };
 

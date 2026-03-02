@@ -1,4 +1,9 @@
-import type { LLMProvider, LLMOptions, ThoughtFormEntities } from './llm.interface.js';
+import type {
+  LLMProvider,
+  LLMOptions,
+  SummarizeOptions,
+  ThoughtFormEntities,
+} from './llm.interface.js';
 
 export class NullProvider implements LLMProvider {
   readonly name = 'none';
@@ -15,7 +20,7 @@ export class NullProvider implements LLMProvider {
     );
   }
 
-  async summarize(_texts: string[]): Promise<string> {
+  async summarize(_texts: string[], _options?: SummarizeOptions): Promise<string> {
     throw new Error(
       'Summarization requires an LLM provider. Configure one in .polytician.json or via environment variables.'
     );

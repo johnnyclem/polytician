@@ -4,6 +4,11 @@ export interface LLMOptions {
   systemPrompt?: string;
 }
 
+export interface SummarizeOptions {
+  neighborDistances?: number[];
+  conceptId?: string;
+}
+
 export interface ThoughtFormEntities {
   entities: Array<{
     id: string;
@@ -25,5 +30,5 @@ export interface LLMProvider {
   readonly name: string;
   complete(prompt: string, options?: LLMOptions): Promise<string>;
   extractEntities(text: string): Promise<ThoughtFormEntities>;
-  summarize(texts: string[]): Promise<string>;
+  summarize(texts: string[], options?: SummarizeOptions): Promise<string>;
 }
