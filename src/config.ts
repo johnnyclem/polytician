@@ -14,6 +14,8 @@ export interface PolyticianConfig {
   modelsDir: string;
   embeddingModel: string;
   llm: LLMConfig;
+  healthPort: number;
+  sidecarUrl: string | null;
 }
 
 const DEFAULT_DATA_DIR = join(homedir(), '.polytician');
@@ -52,6 +54,9 @@ export function getConfig(): PolyticianConfig {
   const fileConfig = loadConfigFile();
   const dataDir = process.env['POLYTICIAN_DATA_DIR'] ?? fileConfig.dataDir ?? DEFAULT_DATA_DIR;
 
+  const healthPortRaw = process.env['POLYTICIAN_HEALTH_PORT'] ?? String(fileConfig.healthPort ?? '8787');
+  const sidecarUrl = process.env['POLYTICIAN_SIDECAR_URL'] ?? (fileConfig.sidecarUrl as string | undefined) ?? null;
+
   cachedConfig = {
     dataDir,
     dbPath: join(dataDir, 'concepts.db'),
@@ -62,6 +67,8 @@ export function getConfig(): PolyticianConfig {
       model: process.env['POLYTICIAN_LLM_MODEL'] ?? fileConfig.llm?.model,
       apiKey: resolveEnvVar(process.env['POLYTICIAN_LLM_API_KEY'] ?? fileConfig.llm?.apiKey),
     },
+    healthPort: parseInt(healthPortRaw, 10) || 8787,
+    sidecarUrl,
   };
 
   return cachedConfig;

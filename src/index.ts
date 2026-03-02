@@ -3,10 +3,16 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.js';
 import { initializeDatabase, closeDatabase } from './db/client.js';
+import { startHealthServer } from './health.js';
+import { logger } from './logger.js';
 
 async function main(): Promise<void> {
   // Initialize database (creates tables, loads sqlite-vec)
   initializeDatabase();
+  logger.info('database initialized');
+
+  // Start HTTP health check server
+  const healthServer = startHealthServer();
 
   // Create MCP server with all tools registered
   const server = createServer();
@@ -14,9 +20,12 @@ async function main(): Promise<void> {
   // Connect via stdio transport
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  logger.info('mcp server connected', { transport: 'stdio' });
 
   // Graceful shutdown
   const shutdown = (): void => {
+    logger.info('shutdown initiated');
+    healthServer.close();
     closeDatabase();
     process.exit(0);
   };
@@ -26,6 +35,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error('Failed to start Polytician:', error);
+  logger.error('failed to start polytician', error);
   process.exit(1);
 });
