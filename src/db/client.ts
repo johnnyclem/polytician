@@ -35,6 +35,20 @@ export async function initializeDatabaseAsync(
   overrideDbPath?: string,
 ): Promise<DatabaseAdapter> {
   if (adapter) return adapter;
+  // Create concepts table
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS concepts (
+      id TEXT PRIMARY KEY,
+      namespace TEXT NOT NULL DEFAULT 'default',
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      tags TEXT DEFAULT '[]',
+      markdown TEXT,
+      thoughtform TEXT,
+      embedding BLOB
+    )
+  `);
 
   const config = getConfig();
 
@@ -45,6 +59,17 @@ export async function initializeDatabaseAsync(
     adapter = pgAdapter;
     return adapter;
   }
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_concepts_namespace ON concepts(namespace)
+  `);
+
+  // Create sqlite-vec virtual table for vector search
+  sqlite.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS concept_vectors USING vec0(
+      concept_id TEXT PRIMARY KEY,
+      embedding float[384]
+    )
+  `);
 
   // SQLite path (synchronous internally)
   return initializeDatabase(overrideDbPath);
