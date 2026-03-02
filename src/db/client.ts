@@ -9,13 +9,13 @@ import { getConfig } from '../config.js';
 let sqlite: DatabaseType | null = null;
 let drizzleDb: ReturnType<typeof drizzle<typeof schema>> | null = null;
 
-export function initializeDatabase(): { db: ReturnType<typeof drizzle<typeof schema>>; sqlite: DatabaseType } {
+export function initializeDatabase(overrideDbPath?: string): { db: ReturnType<typeof drizzle<typeof schema>>; sqlite: DatabaseType } {
   if (sqlite && drizzleDb) {
     return { db: drizzleDb, sqlite };
   }
 
   const config = getConfig();
-  const dbPath = config.dbPath;
+  const dbPath = overrideDbPath ?? config.dbPath;
 
   // Ensure parent directory exists
   const dir = dirname(dbPath);
