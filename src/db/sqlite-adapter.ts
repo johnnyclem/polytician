@@ -31,6 +31,8 @@ export class SqliteAdapter implements DatabaseAdapter {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS concepts (
         id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL DEFAULT 'default',
+        version INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         tags TEXT DEFAULT '[]',
@@ -39,6 +41,18 @@ export class SqliteAdapter implements DatabaseAdapter {
         embedding BLOB
       )
     `);
+
+    // Add namespace and version columns if missing (migration for existing DBs)
+    try {
+      this.db.exec(`ALTER TABLE concepts ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE concepts ADD COLUMN version INTEGER NOT NULL DEFAULT 1`);
+    } catch {
+      // Column already exists
+    }
 
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)
@@ -60,7 +74,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     return (
       (this.db
         .prepare(
-          'SELECT id, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = ?',
+          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = ?',
         )
         .get(id) as ConceptRow | undefined) ?? null
     );
@@ -69,11 +83,13 @@ export class SqliteAdapter implements DatabaseAdapter {
   insertConcept(row: ConceptRow): void {
     this.db
       .prepare(
-        `INSERT INTO concepts (id, created_at, updated_at, tags, markdown, thoughtform, embedding)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
+        row.namespace,
+        row.version,
         row.created_at,
         row.updated_at,
         row.tags,
@@ -99,17 +115,24 @@ export class SqliteAdapter implements DatabaseAdapter {
     limit: number;
     offset: number;
     tags?: string[];
+    namespace?: string;
   }): { rows: ListRow[]; total: number } {
-    let where = '';
+    const conditions: string[] = [];
     const queryParams: unknown[] = [];
 
+    if (params.namespace) {
+      conditions.push('namespace = ?');
+      queryParams.push(params.namespace);
+    }
+
     if (params.tags && params.tags.length > 0) {
-      const conditions = params.tags.map(() => `tags LIKE ?`);
-      where = `WHERE ${conditions.join(' AND ')}`;
       for (const tag of params.tags) {
+        conditions.push('tags LIKE ?');
         queryParams.push(`%"${tag}"%`);
       }
     }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const countResult = this.db
       .prepare(`SELECT COUNT(*) as count FROM concepts ${where}`)
@@ -117,7 +140,7 @@ export class SqliteAdapter implements DatabaseAdapter {
 
     const rows = this.db
       .prepare(
-        `SELECT id, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+        `SELECT id, namespace, version, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
       )
       .all(...queryParams, params.limit, params.offset) as ListRow[];
 
@@ -148,37 +171,43 @@ export class SqliteAdapter implements DatabaseAdapter {
     const placeholders = ids.map(() => '?').join(',');
     return this.db
       .prepare(
-        `SELECT id, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec
+        `SELECT id, namespace, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec
          FROM concepts WHERE id IN (${placeholders})`,
       )
       .all(...ids) as ConceptMetaRow[];
   }
 
-  getStats(): StatsResult {
+  getStats(namespace?: string): StatsResult {
+    const nsFilter = namespace ? ' WHERE namespace = ?' : '';
+    const nsParam = namespace ? [namespace] : [];
+
     const conceptCount = (
-      this.db.prepare('SELECT COUNT(*) as count FROM concepts').get() as {
+      this.db.prepare(`SELECT COUNT(*) as count FROM concepts${nsFilter}`).get(...nsParam) as {
         count: number;
       }
     ).count;
+
+    const vectorSubquery = namespace
+      ? 'SELECT COUNT(*) as count FROM concept_vectors WHERE concept_id IN (SELECT id FROM concepts WHERE namespace = ?)'
+      : 'SELECT COUNT(*) as count FROM concept_vectors';
     const vectorCount = (
-      this.db.prepare('SELECT COUNT(*) as count FROM concept_vectors').get() as {
-        count: number;
-      }
+      this.db.prepare(vectorSubquery).get(...nsParam) as { count: number }
     ).count;
+
     const mdCount = (
       this.db
-        .prepare('SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL')
-        .get() as { count: number }
+        .prepare(`SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`)
+        .get(...nsParam) as { count: number }
     ).count;
     const tfCount = (
       this.db
-        .prepare('SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL')
-        .get() as { count: number }
+        .prepare(`SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`)
+        .get(...nsParam) as { count: number }
     ).count;
     const vecCount = (
       this.db
-        .prepare('SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL')
-        .get() as { count: number }
+        .prepare(`SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`)
+        .get(...nsParam) as { count: number }
     ).count;
 
     return { conceptCount, vectorCount, mdCount, tfCount, vecCount };

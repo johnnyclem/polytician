@@ -62,7 +62,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 describe('MCP Server — Tool integration', () => {
   beforeEach(async () => {
     setupTestDb();
-    const server = createServer();
+    const server = await createServer();
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     client = new Client({ name: 'test-client', version: '1.0.0' });

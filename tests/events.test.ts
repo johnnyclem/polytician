@@ -3,7 +3,7 @@ import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
 import { ConceptService } from '../src/services/concept.service.js';
 import { conceptEventBus } from '../src/events/concept-events.js';
 import { IndexSyncService } from '../src/services/index-sync.service.js';
-import { getSqlite } from '../src/db/client.js';
+import { getAdapter } from '../src/db/client.js';
 
 let service: ConceptService;
 
@@ -131,10 +131,13 @@ describe('IndexSyncService – async vector index synchronisation', () => {
 
     await syncService.waitForPending();
 
-    const sqlite = getSqlite();
-    const row = sqlite.prepare('SELECT concept_id FROM concept_vectors WHERE concept_id = ?').get(id) as { concept_id: string } | undefined;
-    expect(row).toBeDefined();
-    expect(row!.concept_id).toBe(id);
+    const adapter = getAdapter();
+    const results = await adapter.vectorSearch(
+      Buffer.from(new Float32Array(Array.from({ length: 384 }, () => 0.2)).buffer),
+      10
+    );
+    const found = results.find(r => r.concept_id === id);
+    expect(found).toBeDefined();
   });
 
   it('removes the vector row asynchronously on concept.deleted', async () => {
@@ -149,9 +152,13 @@ describe('IndexSyncService – async vector index synchronisation', () => {
     conceptEventBus.emit('concept.deleted', { conceptId: id, timestamp: Date.now() });
     await syncService.waitForPending();
 
-    const sqlite = getSqlite();
-    const row = sqlite.prepare('SELECT concept_id FROM concept_vectors WHERE concept_id = ?').get(id);
-    expect(row).toBeUndefined();
+    const adapter = getAdapter();
+    const results = await adapter.vectorSearch(
+      Buffer.from(new Float32Array(Array.from({ length: 384 }, () => 0.3)).buffer),
+      10
+    );
+    const found = results.find(r => r.concept_id === id);
+    expect(found).toBeUndefined();
   });
 
   it('handles concept.created without embedding without error', async () => {

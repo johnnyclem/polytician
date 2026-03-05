@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: polytician
+  namespace: polytician
+spec:
+  selector:
+    app: polytician
+  ports:
+    - port: 8787
+      targetPort: 8787
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polytician
+  namespace: polytician
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: polytician
+  template:
+    metadata:
+      labels:
+        app: polytician
+    spec:
+      containers:
+        - name: polytician
+          image: polytician:latest
+          env:
+            - name: POLYTICIAN_DB_BACKEND
+              value: postgres
+            - name: POLYTICIAN_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_URL
+            - name: POLYTICIAN_HEALTH_PORT
+              value: "8787"
+            - name: POLYTICIAN_SIDECAR_URL
+              value: http://sidecar:5001
+            - name: NODE_ENV
+              value: production
+          ports:
+            - containerPort: 8787
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8787
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: polytician-hpa
+  namespace: polytician
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: polytician
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

@@ -4,7 +4,7 @@ import {
   type ConceptUpdatedPayload,
   type ConceptDeletedPayload,
 } from '../events/concept-events.js';
-import { getSqlite } from '../db/client.js';
+import { getAdapter } from '../db/client.js';
 
 function serializeEmbedding(embedding: number[]): Buffer {
   const floats = new Float32Array(embedding);
@@ -120,15 +120,14 @@ export class IndexSyncService {
 
   private syncVector(conceptId: string, embedding: number[] | null): void {
     if (!embedding) return;
-    const sqlite = getSqlite();
+    const adapter = getAdapter();
     const buf = serializeEmbedding(embedding);
-    sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(conceptId);
-    sqlite.prepare('INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)').run(conceptId, buf);
+    adapter.upsertVector(conceptId, buf);
   }
 
   private removeVector(conceptId: string): void {
-    const sqlite = getSqlite();
-    sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(conceptId);
+    const adapter = getAdapter();
+    adapter.deleteVector(conceptId);
   }
 }
 

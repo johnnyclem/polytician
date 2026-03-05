@@ -8,6 +8,8 @@
 
 export interface ConceptRow {
   id: string;
+  namespace: string;
+  version: number;
   created_at: number;
   updated_at: number;
   tags: string; // JSON-encoded string[]
@@ -18,6 +20,8 @@ export interface ConceptRow {
 
 export interface ListRow {
   id: string;
+  namespace: string;
+  version: number;
   created_at: number;
   updated_at: number;
   tags: string;
@@ -33,6 +37,7 @@ export interface VectorResult {
 
 export interface ConceptMetaRow {
   id: string;
+  namespace: string;
   tags: string;
   has_md: number;
   has_tf: number;
@@ -70,6 +75,7 @@ export interface DatabaseAdapter {
     limit: number;
     offset: number;
     tags?: string[];
+    namespace?: string;
   }): { rows: ListRow[]; total: number } | Promise<{ rows: ListRow[]; total: number }>;
 
   // --- Vector operations ---
@@ -86,5 +92,5 @@ export interface DatabaseAdapter {
 
   // --- Stats ---
 
-  getStats(): StatsResult | Promise<StatsResult>;
+  getStats(namespace?: string): StatsResult | Promise<StatsResult>;
 }

@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { getSqlite } from './db/client.js';
+import { getAdapter } from './db/client.js';
 import { getConfig } from './config.js';
 import { logger } from './logger.js';
 
@@ -22,8 +22,9 @@ interface HealthResponse {
 
 function checkDatabase(): CheckResult {
   try {
-    const sqlite = getSqlite();
-    sqlite.prepare('SELECT 1').get();
+    const adapter = getAdapter();
+    // Quick check: getStats works if DB is healthy
+    adapter.getStats();
     return { status: 'ok' };
   } catch (err) {
     return { status: 'error', error: err instanceof Error ? err.message : String(err) };
@@ -32,8 +33,12 @@ function checkDatabase(): CheckResult {
 
 function checkVectorIndex(): CheckResult {
   try {
-    const sqlite = getSqlite();
-    sqlite.prepare('SELECT COUNT(*) FROM concept_vectors').get();
+    const adapter = getAdapter();
+    // Quick check: vector search with empty query should not throw
+    adapter.vectorSearch(
+      Buffer.from(new Float32Array(384).buffer),
+      1,
+    );
     return { status: 'ok' };
   } catch (err) {
     return { status: 'error', error: err instanceof Error ? err.message : String(err) };

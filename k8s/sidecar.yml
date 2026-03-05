@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sidecar
+  namespace: polytician
+spec:
+  selector:
+    app: sidecar
+  ports:
+    - port: 5001
+      targetPort: 5001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sidecar
+  namespace: polytician
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sidecar
+  template:
+    metadata:
+      labels:
+        app: sidecar
+    spec:
+      containers:
+        - name: sidecar
+          image: polytician-sidecar:latest
+          env:
+            - name: SIDECAR_PORT
+              value: "5001"
+            - name: EMBEDDING_MODEL
+              value: all-MiniLM-L6-v2
+          ports:
+            - containerPort: 5001
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5001
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 2Gi
+              cpu: "2"

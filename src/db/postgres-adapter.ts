@@ -30,6 +30,8 @@ export class PostgresAdapter implements DatabaseAdapter {
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS concepts (
         id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL DEFAULT 'default',
+        version INTEGER NOT NULL DEFAULT 1,
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL,
         tags TEXT DEFAULT '[]',
@@ -37,6 +39,14 @@ export class PostgresAdapter implements DatabaseAdapter {
         thoughtform TEXT,
         embedding BYTEA
       )
+    `);
+
+    // Add namespace and version columns if missing (migration for existing DBs)
+    await this.pool.query(`
+      DO $$ BEGIN
+        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
+        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      END $$;
     `);
 
     await this.pool.query(`
@@ -73,7 +83,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async findConcept(id: string): Promise<ConceptRow | null> {
     const result = await this.pool.query(
-      'SELECT id, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = $1',
+      'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = $1',
       [id],
     );
     if (result.rows.length === 0) return null;
@@ -82,10 +92,12 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async insertConcept(row: ConceptRow): Promise<void> {
     await this.pool.query(
-      `INSERT INTO concepts (id, created_at, updated_at, tags, markdown, thoughtform, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         row.id,
+        row.namespace,
+        row.version,
         row.created_at,
         row.updated_at,
         row.tags,
@@ -116,18 +128,25 @@ export class PostgresAdapter implements DatabaseAdapter {
     limit: number;
     offset: number;
     tags?: string[];
+    namespace?: string;
   }): Promise<{ rows: ListRow[]; total: number }> {
-    let where = '';
+    const conditions: string[] = [];
     const queryParams: unknown[] = [];
     let paramIdx = 1;
 
-    if (params.tags && params.tags.length > 0) {
-      const conditions = params.tags.map((tag) => {
-        queryParams.push(`%"${tag}"%`);
-        return `tags LIKE $${paramIdx++}`;
-      });
-      where = `WHERE ${conditions.join(' AND ')}`;
+    if (params.namespace) {
+      conditions.push(`namespace = $${paramIdx++}`);
+      queryParams.push(params.namespace);
     }
+
+    if (params.tags && params.tags.length > 0) {
+      for (const tag of params.tags) {
+        conditions.push(`tags LIKE $${paramIdx++}`);
+        queryParams.push(`%"${tag}"%`);
+      }
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const countResult = await this.pool.query(
       `SELECT COUNT(*) as count FROM concepts ${where}`,
@@ -136,7 +155,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     const listParams = [...queryParams, params.limit, params.offset];
     const rows = await this.pool.query(
-      `SELECT id, created_at, updated_at, tags,
+      `SELECT id, namespace, version, created_at, updated_at, tags,
               CASE WHEN markdown IS NOT NULL THEN 1 ELSE 0 END as has_md,
               CASE WHEN thoughtform IS NOT NULL THEN 1 ELSE 0 END as has_tf,
               CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_vec
@@ -149,6 +168,8 @@ export class PostgresAdapter implements DatabaseAdapter {
     return {
       rows: rows.rows.map((r) => ({
         id: r.id as string,
+        namespace: (r.namespace as string) ?? 'default',
+        version: Number(r.version ?? 1),
         created_at: Number(r.created_at),
         updated_at: Number(r.updated_at),
         tags: r.tags as string,
@@ -205,7 +226,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     if (ids.length === 0) return [];
     const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
     const result = await this.pool.query(
-      `SELECT id, tags,
+      `SELECT id, namespace, tags,
               CASE WHEN markdown IS NOT NULL THEN 1 ELSE 0 END as has_md,
               CASE WHEN thoughtform IS NOT NULL THEN 1 ELSE 0 END as has_tf,
               CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_vec
@@ -215,6 +236,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     return result.rows.map((r) => ({
       id: r.id as string,
+      namespace: (r.namespace as string) ?? 'default',
       tags: r.tags as string,
       has_md: Number(r.has_md),
       has_tf: Number(r.has_tf),
@@ -222,13 +244,30 @@ export class PostgresAdapter implements DatabaseAdapter {
     }));
   }
 
-  async getStats(): Promise<StatsResult> {
+  async getStats(namespace?: string): Promise<StatsResult> {
+    const nsFilter = namespace ? ' WHERE namespace = $1' : '';
+    const nsParam = namespace ? [namespace] : [];
+
     const [concepts, vectors, md, tf, vec] = await Promise.all([
-      this.pool.query('SELECT COUNT(*) as count FROM concepts'),
-      this.pool.query('SELECT COUNT(*) as count FROM concept_vectors'),
-      this.pool.query('SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL'),
-      this.pool.query('SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL'),
-      this.pool.query('SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL'),
+      this.pool.query(`SELECT COUNT(*) as count FROM concepts${nsFilter}`, nsParam),
+      namespace
+        ? this.pool.query(
+            'SELECT COUNT(*) as count FROM concept_vectors WHERE concept_id IN (SELECT id FROM concepts WHERE namespace = $1)',
+            nsParam,
+          )
+        : this.pool.query('SELECT COUNT(*) as count FROM concept_vectors'),
+      this.pool.query(
+        `SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL${namespace ? ' AND namespace = $1' : ''}`,
+        nsParam,
+      ),
+      this.pool.query(
+        `SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL${namespace ? ' AND namespace = $1' : ''}`,
+        nsParam,
+      ),
+      this.pool.query(
+        `SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL${namespace ? ' AND namespace = $1' : ''}`,
+        nsParam,
+      ),
     ]);
 
     return {
@@ -244,6 +283,8 @@ export class PostgresAdapter implements DatabaseAdapter {
   private toConceptRow(row: Record<string, unknown>): ConceptRow {
     return {
       id: row.id as string,
+      namespace: (row.namespace as string) ?? 'default',
+      version: Number(row.version ?? 1),
       created_at: Number(row.created_at),
       updated_at: Number(row.updated_at),
       tags: row.tags as string,

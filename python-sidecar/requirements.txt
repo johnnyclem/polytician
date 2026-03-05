@@ -1,0 +1,11 @@
+# Python sidecar dependencies for Polytician ML services
+# sentence-transformers >= 3.0 required to patch arbitrary code execution (CVE-2024-XXXXX)
+sentence-transformers>=3.4.0
+transformers>=4.47.0
+torch>=2.2.0
+spacy>=3.7.0
+faiss-cpu>=1.8.0
+flask>=3.1.0
+gunicorn>=23.0.0
+pydantic>=2.10.0
+numpy>=1.26.0,<2.0.0

@@ -25,27 +25,11 @@ function parseThoughtForm(raw: string | null): ThoughtForm | null {
 function rowToConcept(row: ConceptRow): Concept {
   return {
     id: row.id,
+    namespace: row.namespace,
+    version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     tags: JSON.parse(row.tags) as string[],
-function rowToConcept(row: {
-  id: string;
-  namespace: string;
-  version: number;
-  createdAt: number;
-  updatedAt: number;
-  tags: string[] | null;
-  markdown: string | null;
-  thoughtform: string | null;
-  embedding: Buffer | null;
-}): Concept {
-  return {
-    id: row.id,
-    namespace: row.namespace,
-    version: row.version,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    tags: row.tags ?? [],
     markdown: row.markdown,
     thoughtform: parseThoughtForm(row.thoughtform),
     embedding: deserializeEmbedding(row.embedding),
@@ -69,18 +53,18 @@ export class ConceptService {
     const adapter = getAdapter();
     const now = Date.now();
     const id = params.id ?? this.generateId();
-    const namespace = params.namespace ?? 'default';
 
     // Check if concept exists
     const existing = await adapter.findConcept(id);
 
     if (existing) {
       // Optimistic concurrency control
-      if (params.expectedVersion !== undefined && params.expectedVersion !== existing.version) {
-        throw new VersionConflictError(id, params.expectedVersion, existing.version);
+      const currentVersion = existing.version;
+      if (params.expectedVersion !== undefined && params.expectedVersion !== currentVersion) {
+        throw new VersionConflictError(id, params.expectedVersion, currentVersion);
       }
 
-      const newVersion = existing.version + 1;
+      const newVersion = currentVersion + 1;
 
       // Merge: only overwrite fields that are explicitly provided
       const existingTags: string[] = JSON.parse(existing.tags) as string[];
@@ -112,8 +96,11 @@ export class ConceptService {
       });
     } else {
       const tags = params.tags ?? [];
+      const namespace = params.namespace ?? 'default';
       const row: ConceptRow = {
         id,
+        namespace,
+        version: 1,
         created_at: now,
         updated_at: now,
         tags: JSON.stringify(tags),
@@ -125,24 +112,6 @@ export class ConceptService {
       await adapter.insertConcept(row);
 
       // Sync vector index
-      sqlite
-        .prepare(
-          `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          id,
-          namespace,
-          1,
-          now,
-          now,
-          JSON.stringify(tags),
-          params.markdown ?? null,
-          params.thoughtform ? JSON.stringify(params.thoughtform) : null,
-          params.embedding ? serializeEmbedding(params.embedding) : null
-        );
-
-      // Sync sqlite-vec
       if (params.embedding) {
         await adapter.upsertVector(id, serializeEmbedding(params.embedding));
       }
@@ -207,13 +176,16 @@ export class ConceptService {
 
     await adapter.deleteVector(id);
     await adapter.deleteConcept(id);
-    sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
-    db.delete(concepts).where(eq(concepts.id, id)).run();
 
     conceptEventBus.emit('concept.deleted', { conceptId: id, timestamp: Date.now() });
   }
 
-  async list(params?: { namespace?: string; limit?: number; offset?: number; tags?: string[] }): Promise<{
+  async list(params?: {
+    namespace?: string;
+    limit?: number;
+    offset?: number;
+    tags?: string[];
+  }): Promise<{
     concepts: Array<{
       id: string;
       namespace: string;
@@ -228,43 +200,16 @@ export class ConceptService {
     const adapter = getAdapter();
     const limit = params?.limit ?? 50;
     const offset = params?.offset ?? 0;
-    const namespace = params?.namespace ?? 'default';
 
     const { rows, total } = await adapter.listConcepts({
       limit,
       offset,
       tags: params?.tags,
+      namespace: params?.namespace ?? 'default',
     });
-    // Build query
-    const conditions: string[] = ['namespace = ?'];
-    const queryParams: unknown[] = [namespace];
-
-    if (params?.tags && params.tags.length > 0) {
-      for (const tag of params.tags) {
-        conditions.push(`tags LIKE ?`);
-        queryParams.push(`%"${tag}"%`);
-      }
-    }
-
-    const where = `WHERE ${conditions.join(' AND ')}`;
-
-    const countResult = sqlite.prepare(`SELECT COUNT(*) as count FROM concepts ${where}`).get(...queryParams) as { count: number };
-    const rows = sqlite
-      .prepare(`SELECT id, namespace, version, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
-      .all(...queryParams, limit, offset) as Array<{
-        id: string;
-        namespace: string;
-        version: number;
-        created_at: number;
-        updated_at: number;
-        tags: string;
-        has_md: number;
-        has_tf: number;
-        has_vec: number;
-      }>;
 
     return {
-      concepts: rows.map((r) => ({
+      concepts: rows.map(r => ({
         id: r.id,
         namespace: r.namespace,
         version: r.version,
@@ -285,80 +230,28 @@ export class ConceptService {
     queryEmbedding: number[],
     k: number = 10,
     tags?: string[],
+    options?: { namespace?: string; crossNamespace?: boolean }
   ): Promise<
     Array<{
       id: string;
       distance: number;
       tags: string[];
+      namespace: string;
       representations: ConceptRepresentations;
     }>
   > {
     const adapter = getAdapter();
-  async search(queryEmbedding: number[], k: number = 10, tags?: string[], options?: {
-    namespace?: string;
-    crossNamespace?: boolean;
-  }): Promise<Array<{
-    id: string;
-    distance: number;
-    tags: string[];
-    namespace: string;
-    representations: ConceptRepresentations;
-  }>> {
-    const sqlite = getSqlite();
     const queryBuf = serializeEmbedding(queryEmbedding);
     const namespace = options?.namespace ?? 'default';
     const crossNamespace = options?.crossNamespace ?? false;
 
-    const vecResults = await adapter.vectorSearch(queryBuf, k);
-    const vecResults = sqlite
-      .prepare('SELECT concept_id, distance FROM concept_vectors WHERE embedding MATCH ? AND k = ? ORDER BY distance')
-      .all(queryBuf, k * (crossNamespace ? 1 : 3)) as Array<{ concept_id: string; distance: number }>;
+    const vecResults = await adapter.vectorSearch(queryBuf, crossNamespace ? k : k * 3);
 
     if (vecResults.length === 0) return [];
 
     // Fetch concept metadata for results
-    const ids = vecResults.map((r) => r.concept_id);
-    const conceptRows = await adapter.findConceptMeta(ids);
-    const conceptMap = new Map(conceptRows.map((r) => [r.id, r]));
-
-    let results = vecResults.map((vr) => {
-      const cr = conceptMap.get(vr.concept_id);
-      const parsedTags = cr ? (JSON.parse(cr.tags) as string[]) : [];
-      return {
-        id: vr.concept_id,
-        distance: vr.distance,
-        tags: parsedTags,
-        representations: {
-          vector: cr ? cr.has_vec === 1 : false,
-          markdown: cr ? cr.has_md === 1 : false,
-          thoughtform: cr ? cr.has_tf === 1 : false,
-        },
-      };
-    });
     const ids = vecResults.map(r => r.concept_id);
-    const placeholders = ids.map(() => '?').join(',');
-
-    let namespaceSql = '';
-    const metaParams: unknown[] = [...ids];
-    if (!crossNamespace) {
-      namespaceSql = ' AND namespace = ?';
-      metaParams.push(namespace);
-    }
-
-    const conceptRows = sqlite
-      .prepare(
-        `SELECT id, namespace, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec
-         FROM concepts WHERE id IN (${placeholders})${namespaceSql}`
-      )
-      .all(...metaParams) as Array<{
-        id: string;
-        namespace: string;
-        tags: string;
-        has_md: number;
-        has_tf: number;
-        has_vec: number;
-      }>;
-
+    const conceptRows = await adapter.findConceptMeta(ids);
     const conceptMap = new Map(conceptRows.map(r => [r.id, r]));
 
     let results = vecResults
@@ -379,12 +272,16 @@ export class ConceptService {
         };
       });
 
-    // Filter by tags if specified
-    if (tags && tags.length > 0) {
-      results = results.filter((r) => tags.every((t) => r.tags.includes(t)));
+    // Filter by namespace unless cross-namespace is enabled
+    if (!crossNamespace) {
+      results = results.filter(r => r.namespace === namespace);
     }
 
-    // Limit to k results after namespace filtering
+    // Filter by tags if specified
+    if (tags && tags.length > 0) {
+      results = results.filter(r => tags.every(t => r.tags.includes(t)));
+    }
+
     return results.slice(0, k);
   }
 
@@ -394,17 +291,7 @@ export class ConceptService {
     representationCounts: { markdown: number; thoughtform: number; vector: number };
   }> {
     const adapter = getAdapter();
-    const stats = await adapter.getStats();
-    const sqlite = getSqlite();
-    const ns = namespace ?? 'default';
-
-    const conceptCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE namespace = ?').get(ns) as { count: number }).count;
-    const vectorCount = (sqlite.prepare(
-      'SELECT COUNT(*) as count FROM concept_vectors WHERE concept_id IN (SELECT id FROM concepts WHERE namespace = ?)'
-    ).get(ns) as { count: number }).count;
-    const mdCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE namespace = ? AND markdown IS NOT NULL').get(ns) as { count: number }).count;
-    const tfCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE namespace = ? AND thoughtform IS NOT NULL').get(ns) as { count: number }).count;
-    const vecCount = (sqlite.prepare('SELECT COUNT(*) as count FROM concepts WHERE namespace = ? AND embedding IS NOT NULL').get(ns) as { count: number }).count;
+    const stats = await adapter.getStats(namespace);
 
     return {
       conceptCount: stats.conceptCount,
@@ -417,12 +304,6 @@ export class ConceptService {
     };
   }
 
-  /**
-   * Save multiple concepts in a single transaction with deferred vector index updates.
-   * Embedding generation is processed in batches for entries that provide markdown
-   * but no embedding. FAISS/sqlite-vec index updates are deferred until all concepts
-   * are inserted, improving throughput relative to sequential insertion.
-   */
   async saveBatch(
     entries: Array<{
       id?: string;
@@ -431,105 +312,16 @@ export class ConceptService {
       embedding?: number[];
       tags?: string[];
     }>,
-    options?: { batchSize?: number }
+    _options?: { batchSize?: number }
   ): Promise<{ saved: Concept[]; count: number }> {
-    const sqlite = getSqlite();
-    const db = getDatabase();
-    const now = Date.now();
-    const batchSize = options?.batchSize ?? 50;
-
     const saved: Concept[] = [];
-    const deferredVectors: Array<{ id: string; embedding: number[] }> = [];
 
-    // Process in batches within a single transaction
-    const runTransaction = sqlite.transaction(() => {
-      for (let batchStart = 0; batchStart < entries.length; batchStart += batchSize) {
-        const batch = entries.slice(batchStart, batchStart + batchSize);
-
-        for (const params of batch) {
-          const id = params.id ?? this.generateId();
-          const existing = db.select().from(concepts).where(eq(concepts.id, id)).get();
-
-          if (existing) {
-            const existingTags: string[] = (existing.tags as string[] | null) ?? [];
-            const newTags = params.tags
-              ? [...new Set([...existingTags, ...params.tags])]
-              : existingTags;
-
-            const updates: Record<string, unknown> = {
-              updated_at: now,
-              tags: JSON.stringify(newTags),
-            };
-
-            if (params.markdown !== undefined) updates['markdown'] = params.markdown;
-            if (params.thoughtform !== undefined)
-              updates['thoughtform'] = JSON.stringify(params.thoughtform);
-            if (params.embedding !== undefined)
-              updates['embedding'] = serializeEmbedding(params.embedding);
-
-            const setClauses = Object.keys(updates)
-              .map(k => `${k} = ?`)
-              .join(', ');
-            const values = Object.values(updates);
-            sqlite.prepare(`UPDATE concepts SET ${setClauses} WHERE id = ?`).run(...values, id);
-
-            if (params.embedding !== undefined) {
-              deferredVectors.push({ id, embedding: params.embedding });
-            }
-          } else {
-            const tags = params.tags ?? [];
-            sqlite
-              .prepare(
-                `INSERT INTO concepts (id, created_at, updated_at, tags, markdown, thoughtform, embedding)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`
-              )
-              .run(
-                id,
-                now,
-                now,
-                JSON.stringify(tags),
-                params.markdown ?? null,
-                params.thoughtform ? JSON.stringify(params.thoughtform) : null,
-                params.embedding ? serializeEmbedding(params.embedding) : null
-              );
-
-            if (params.embedding) {
-              deferredVectors.push({ id, embedding: params.embedding });
-            }
-          }
-
-          const row = db.select().from(concepts).where(eq(concepts.id, id)).get();
-          if (row) saved.push(rowToConcept(row));
-        }
-      }
-
-      // Deferred vector index updates: batch all sqlite-vec writes after concept inserts
-      const deleteStmt = sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?');
-      const insertStmt = sqlite.prepare(
-        'INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)'
-      );
-
-      for (const { id, embedding } of deferredVectors) {
-        const buf = serializeEmbedding(embedding);
-        deleteStmt.run(id);
-        insertStmt.run(id, buf);
-      }
-    });
-
-    runTransaction();
+    for (const entry of entries) {
+      const concept = await this.save(entry);
+      saved.push(concept);
+    }
 
     return { saved, count: saved.length };
-  }
-
-  private upsertVector(id: string, embedding: number[]): void {
-    const sqlite = getSqlite();
-    const buf = serializeEmbedding(embedding);
-
-    // Delete existing if present, then insert
-    sqlite.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
-    sqlite
-      .prepare('INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)')
-      .run(id, buf);
   }
 }
 
