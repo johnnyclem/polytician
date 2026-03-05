@@ -7,8 +7,9 @@ import { embeddingService } from './services/embedding.service.js';
 import { VECTOR_DIMENSION } from './types/concept.js';
 import { withRequestLogging } from './logger.js';
 import { VersionConflictError } from './errors/index.js';
+import { getConfig } from './config.js';
 
-export function createServer(): McpServer {
+export async function createServer(): Promise<McpServer> {
   const server = new McpServer({
     name: 'polytician',
     version: '2.0.0',
@@ -238,6 +239,15 @@ export function createServer(): McpServer {
       return { content: [{ type: 'text' as const, text: JSON.stringify(stats, null, 2) }] };
     }
   );
+
+  // Register AgentVault tools if integration is configured
+  const cfg = getConfig();
+  if (cfg.agentVault) {
+    const { registerVaultTools } = await import(
+      './integrations/agent-vault/tools/vault-tools.js'
+    );
+    registerVaultTools(server, cfg.agentVault);
+  }
 
   return server;
 }
