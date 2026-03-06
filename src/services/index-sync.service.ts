@@ -5,6 +5,8 @@ import {
   type ConceptDeletedPayload,
 } from '../events/concept-events.js';
 import { getAdapter } from '../db/client.js';
+import { rebuildFaissIndex } from '../sidecar/faiss.js';
+import { logger } from '../logger.js';
 
 function serializeEmbedding(embedding: number[]): Buffer {
   const floats = new Float32Array(embedding);
@@ -115,6 +117,32 @@ export class IndexSyncService {
     // If more items were enqueued while flushing, schedule another pass.
     if (this.pendingUpdates.length > 0) {
       this.scheduleFlush();
+    }
+  }
+
+  /**
+   * Trigger a FAISS index rebuild on the Python sidecar after deserialization.
+   *
+   * Call this after batch-upserting restored ThoughtForms so the sidecar's
+   * in-memory FAISS index contains the new vectors.  The method is async and
+   * can be awaited to confirm the rebuild completed, but errors are logged
+   * rather than propagated so deserialization is not blocked by sidecar
+   * availability.
+   */
+  async rebuildAfterDeserialize(
+    entries: Array<{ id: string; text: string }>,
+  ): Promise<void> {
+    if (entries.length === 0) return;
+
+    const ids = entries.map(e => e.id);
+    const texts = entries.map(e => e.text);
+
+    try {
+      await rebuildFaissIndex({ ids, texts });
+    } catch (err) {
+      logger.error('faiss rebuild after deserialize failed', err, {
+        idCount: ids.length,
+      });
     }
   }
 
