@@ -14,6 +14,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { runBackup, type BackupOptions, type BackupResult } from './backup.js';
 import { runRestore, type RestoreOptions, type RestoreResult } from './restore.js';
 import { upsertThoughtforms, type UpsertResult } from '../../storage/sqlite-upsert.js';
+import { vaultLogger } from '../../polyvault/logger.js';
 import type { FaissRebuildClient, FaissRebuildMode, FaissRebuildResult } from '../../lib/polyvault/faiss-client.js';
 import type { DatabaseAdapter } from '../../db/adapter.js';
 import type { CanisterClient } from '../../lib/polyvault/upload.js';
@@ -48,6 +49,9 @@ export async function runRestoreE2E(
   faissClient: FaissRebuildClient | null,
   options: RestoreE2EOptions,
 ): Promise<{ result: RestoreE2EResult; exitCode: number }> {
+  const startMs = Date.now();
+  vaultLogger.info('restore-e2e.start', { mode: options.mode, faissMode: options.faissMode });
+
   // Step 1: Run restore pipeline
   const { result: restoreResult, exitCode } = await runRestore(client, options);
 
@@ -60,6 +64,7 @@ export async function runRestoreE2E(
 
   // Empty restore — no work to do
   if (restoreResult.status === 'empty' || restoreResult.thoughtformCount === 0) {
+    vaultLogger.info('restore-e2e.empty', { duration_ms: Date.now() - startMs });
     return {
       result: { restore: restoreResult, upsert: null, faiss: null },
       exitCode: 0,
@@ -73,6 +78,7 @@ export async function runRestoreE2E(
     thoughtforms = JSON.parse(text) as ThoughtFormV1[];
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    vaultLogger.error('restore-e2e.read-output.failed', { errorMessage: message });
     return {
       result: {
         restore: restoreResult,
@@ -88,8 +94,14 @@ export async function runRestoreE2E(
   let upsertResult: UpsertResult;
   try {
     upsertResult = await upsertThoughtforms(db, thoughtforms);
+    vaultLogger.info('restore-e2e.upsert.complete', {
+      inserted: upsertResult.inserted,
+      updated: upsertResult.updated,
+      skipped: upsertResult.skipped,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    vaultLogger.error('restore-e2e.upsert.failed', { errorMessage: message });
     return {
       result: {
         restore: restoreResult,
@@ -106,8 +118,13 @@ export async function runRestoreE2E(
   if (faissClient) {
     try {
       faissResult = await faissClient.rebuildIndex(thoughtforms, options.faissMode);
+      vaultLogger.info('restore-e2e.faiss.complete', {
+        mode: options.faissMode,
+        vectorCount: faissResult.vectorCount,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      vaultLogger.error('restore-e2e.faiss.failed', { errorMessage: message });
       return {
         result: {
           restore: restoreResult,
@@ -119,6 +136,15 @@ export async function runRestoreE2E(
       };
     }
   }
+
+  vaultLogger.info('restore-e2e.complete', {
+    thoughtformCount: restoreResult.thoughtformCount,
+    inserted: upsertResult.inserted,
+    updated: upsertResult.updated,
+    skipped: upsertResult.skipped,
+    faissVectors: faissResult?.vectorCount ?? 0,
+    duration_ms: Date.now() - startMs,
+  });
 
   return {
     result: { restore: restoreResult, upsert: upsertResult, faiss: faissResult },
@@ -155,6 +181,9 @@ export async function runBackupE2E(
   db: DatabaseAdapter,
   options: BackupE2EOptions,
 ): Promise<{ result: BackupE2EResult; exitCode: number }> {
+  const startMs = Date.now();
+  vaultLogger.info('backup-e2e.start', { source: options.from === '__sqlite__' ? 'sqlite' : 'file' });
+
   let conceptsRead = 0;
 
   // Read ThoughtForms from SQLite if requested
@@ -166,8 +195,10 @@ export async function runBackupE2E(
     });
 
     conceptsRead = thoughtforms.length;
+    vaultLogger.debug('backup-e2e.db-read', { conceptsRead });
 
     if (thoughtforms.length === 0) {
+      vaultLogger.info('backup-e2e.empty', { duration_ms: Date.now() - startMs });
       const emptyResult: BackupResult = {
         status: 'ok',
         bundleId: '',
@@ -195,6 +226,13 @@ export async function runBackupE2E(
 
   // Run backup pipeline
   const { result: backupResult, exitCode } = await runBackup(client, options);
+
+  vaultLogger.info('backup-e2e.complete', {
+    status: backupResult.status,
+    conceptsRead,
+    thoughtformCount: backupResult.thoughtformCount,
+    duration_ms: Date.now() - startMs,
+  });
 
   return {
     result: { backup: backupResult, conceptsRead },

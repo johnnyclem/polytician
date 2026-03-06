@@ -12,6 +12,7 @@ import {
   type CanisterClient,
   type ChunkInput,
 } from '../../lib/polyvault/upload.js';
+import { vaultLogger, classifyFailure } from '../../polyvault/logger.js';
 import type { ThoughtFormV1 } from '../../schemas/thoughtform.js';
 import type { BundleV1 } from '../../schemas/bundle.js';
 
@@ -79,6 +80,15 @@ export async function runBackup(
   client: CanisterClient,
   options: BackupOptions
 ): Promise<{ result: BackupResult; exitCode: number }> {
+  const startMs = Date.now();
+  vaultLogger.info('backup.start', {
+    compress: options.compress,
+    encrypt: options.encrypt,
+    encryptionRequired: options.encryptionRequired,
+    chunkSize: options.chunkSize,
+    sinceUpdatedAt: options.sinceUpdatedAt,
+  });
+
   // Step 1: Read input
   let rawInput: unknown;
   try {
@@ -86,17 +96,11 @@ export async function runBackup(
     rawInput = JSON.parse(text);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      result: errorResult(`Failed to read input file: ${message}`),
-      exitCode: EXIT_VALIDATION,
-    };
+    return failBackup(`Failed to read input file: ${message}`, EXIT_VALIDATION, startMs);
   }
 
   if (!Array.isArray(rawInput)) {
-    return {
-      result: errorResult('Input must be a JSON array of ThoughtForms'),
-      exitCode: EXIT_VALIDATION,
-    };
+    return failBackup('Input must be a JSON array of ThoughtForms', EXIT_VALIDATION, startMs);
   }
 
   // Validate each ThoughtForm
@@ -105,10 +109,7 @@ export async function runBackup(
     const parsed = parseThoughtForm(rawInput[i]);
     if (parsed.ok === false) {
       const paths = parsed.errors.map(e => `${e.path}: ${e.message}`).join('; ');
-      return {
-        result: errorResult(`ThoughtForm[${i}] validation failed: ${paths}`),
-        exitCode: EXIT_VALIDATION,
-      };
+      return failBackup(`ThoughtForm[${i}] validation failed: ${paths}`, EXIT_VALIDATION, startMs);
     }
     thoughtforms.push(parsed.data);
   }
@@ -131,8 +132,14 @@ export async function runBackup(
         : 0;
   });
 
+  vaultLogger.debug('backup.validated', {
+    inputCount: rawInput.length,
+    filteredCount: filtered.length,
+  });
+
   // Empty backup: still valid, no-op
   if (filtered.length === 0) {
+    vaultLogger.info('backup.empty', { inputCount: rawInput.length, duration_ms: Date.now() - startMs });
     const emptyResult: BackupResult = {
       status: 'ok',
       bundleId: '',
@@ -217,10 +224,7 @@ export async function runBackup(
   let finalBytes: Uint8Array;
   if (options.encrypt !== 'none') {
     if (!options.encryptionKey) {
-      return {
-        result: errorResult('Encryption key required but not provided'),
-        exitCode: EXIT_VALIDATION,
-      };
+      return failBackup('Encryption key required but not provided', EXIT_VALIDATION, startMs);
     }
     const { ciphertext } = await cryptoAdapter.encrypt(compressedBytes, options.encryptionKey);
     finalBytes = ciphertext;
@@ -241,6 +245,15 @@ export async function runBackup(
     encrypted: options.encrypt !== 'none',
     payload: c.payload,
   }));
+
+  vaultLogger.info('backup.upload.start', {
+    bundleId,
+    commitId,
+    chunkCount: rawChunks.length,
+    payloadSizeBytes: finalBytes.length,
+    compressed: options.compress !== 'none',
+    encrypted: options.encrypt !== 'none',
+  });
 
   // Step 6 & 7: Upload and finalize
   try {
@@ -272,47 +285,62 @@ export async function runBackup(
       writeFileSync(options.out, JSON.stringify(backupResult, null, 2));
     }
 
+    vaultLogger.info('backup.complete', {
+      status: backupResult.status,
+      bundleId,
+      commitId,
+      thoughtformCount: filtered.length,
+      chunkCount: rawChunks.length,
+      chunksUploaded: uploadResult.chunksUploaded,
+      payloadHash,
+      duplicateOf: uploadResult.duplicateOf,
+      duration_ms: Date.now() - startMs,
+    });
+
     return { result: backupResult, exitCode: EXIT_SUCCESS };
   } catch (err) {
     if (err instanceof ChunkUploadError) {
-      return {
-        result: errorResult(`Chunk upload failed: ${err.message}`),
-        exitCode: EXIT_NETWORK,
-      };
+      return failBackup(`Chunk upload failed: ${err.message}`, EXIT_NETWORK, startMs);
     }
     if (err instanceof FinalizeError) {
       if (err.reason.includes('Unauthorized')) {
-        return {
-          result: errorResult(`Authorization failed: ${err.reason}`),
-          exitCode: EXIT_AUTH,
-        };
+        return failBackup(`Authorization failed: ${err.reason}`, EXIT_AUTH, startMs);
       }
-      return {
-        result: errorResult(`Finalize failed: ${err.reason}`),
-        exitCode: EXIT_INTEGRITY,
-      };
+      return failBackup(`Finalize failed: ${err.reason}`, EXIT_INTEGRITY, startMs);
     }
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      result: errorResult(`Unexpected error: ${message}`),
-      exitCode: EXIT_NETWORK,
-    };
+    return failBackup(`Unexpected error: ${message}`, EXIT_NETWORK, startMs);
   }
 }
 
-function errorResult(message: string): BackupResult {
+function failBackup(
+  message: string,
+  exitCode: number,
+  startMs: number
+): { result: BackupResult; exitCode: number } {
+  const failure = classifyFailure(exitCode, message);
+  vaultLogger.error('backup.failed', {
+    exitCode,
+    errorCode: failure.code,
+    errorMessage: failure.message,
+    remediation: failure.remediation,
+    duration_ms: Date.now() - startMs,
+  });
   return {
-    status: 'error',
-    bundleId: '',
-    commitId: '',
-    parentCommitId: null,
-    thoughtformCount: 0,
-    chunkCount: 0,
-    chunksUploaded: 0,
-    payloadHash: '',
-    compression: 'none',
-    encryption: 'none',
-    duplicateOf: null,
-    ...({ error: message } as Record<string, unknown>),
-  } as BackupResult;
+    result: {
+      status: 'error',
+      bundleId: '',
+      commitId: '',
+      parentCommitId: null,
+      thoughtformCount: 0,
+      chunkCount: 0,
+      chunksUploaded: 0,
+      payloadHash: '',
+      compression: 'none',
+      encryption: 'none',
+      duplicateOf: null,
+      ...({ error: message } as Record<string, unknown>),
+    } as BackupResult,
+    exitCode,
+  };
 }

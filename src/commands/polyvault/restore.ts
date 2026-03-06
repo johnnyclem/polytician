@@ -13,6 +13,9 @@ import {
   type RestoreClient,
   type CommitRecord,
 } from '../../lib/polyvault/download.js';
+import { vaultLogger, classifyFailure } from '../../polyvault/logger.js';
+import { upsertThoughtforms, extractEmbeddingText, type UpsertResult } from '../../storage/sqlite-upsert.js';
+import type { DatabaseAdapter } from '../../db/adapter.js';
 import type { ThoughtFormV1 } from '../../schemas/thoughtform.js';
 import type { BundleV1 } from '../../schemas/bundle.js';
 
@@ -75,6 +78,14 @@ export async function runRestore(
   client: RestoreClient,
   options: RestoreOptions
 ): Promise<{ result: RestoreResult; exitCode: number }> {
+  const startMs = Date.now();
+  vaultLogger.info('restore.start', {
+    mode: options.mode,
+    compression: options.compression,
+    encryption: options.encryption,
+    sinceCommitCreatedAtMs: options.sinceCommitCreatedAtMs,
+  });
+
   // Step 1: Fetch commits
   const sinceMs = options.mode === 'full' ? 0 : options.sinceCommitCreatedAtMs;
 
@@ -84,25 +95,19 @@ export async function runRestore(
   } catch (err) {
     if (err instanceof CommitFetchError) {
       if (err.reason.includes('Unauthorized')) {
-        return {
-          result: errorResult(`Authorization failed: ${err.reason}`),
-          exitCode: EXIT_AUTH,
-        };
+        return failRestore(`Authorization failed: ${err.reason}`, EXIT_AUTH, startMs);
       }
-      return {
-        result: errorResult(`Failed to list commits: ${err.reason}`),
-        exitCode: EXIT_NETWORK,
-      };
+      return failRestore(`Failed to list commits: ${err.reason}`, EXIT_NETWORK, startMs);
     }
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      result: errorResult(`Unexpected error listing commits: ${message}`),
-      exitCode: EXIT_NETWORK,
-    };
+    return failRestore(`Unexpected error listing commits: ${message}`, EXIT_NETWORK, startMs);
   }
+
+  vaultLogger.debug('restore.commits.fetched', { commitCount: commits.length });
 
   // No commits found
   if (commits.length === 0) {
+    vaultLogger.info('restore.empty', { duration_ms: Date.now() - startMs });
     const emptyResult: RestoreResult = {
       status: 'empty',
       commitCount: 0,
@@ -129,6 +134,12 @@ export async function runRestore(
   let totalChunks = 0;
 
   for (const commit of commits) {
+    vaultLogger.debug('restore.commit.process', {
+      commitId: commit.commitId,
+      chunkCount: commit.chunkCount,
+      manifestHash: commit.manifestHash,
+    });
+
     // Step 2: Fetch chunks for this commit
     let chunkRecords;
     try {
@@ -136,21 +147,16 @@ export async function runRestore(
     } catch (err) {
       if (err instanceof ChunkFetchError) {
         if (err.reason.includes('Unauthorized')) {
-          return {
-            result: errorResult(`Authorization failed: ${err.reason}`),
-            exitCode: EXIT_AUTH,
-          };
+          return failRestore(`Authorization failed: ${err.reason}`, EXIT_AUTH, startMs);
         }
-        return {
-          result: errorResult(`Failed to fetch chunks for commit ${commit.commitId}: ${err.reason}`),
-          exitCode: EXIT_NETWORK,
-        };
+        return failRestore(
+          `Failed to fetch chunks for commit ${commit.commitId}: ${err.reason}`,
+          EXIT_NETWORK,
+          startMs
+        );
       }
       const message = err instanceof Error ? err.message : String(err);
-      return {
-        result: errorResult(`Unexpected error fetching chunks: ${message}`),
-        exitCode: EXIT_NETWORK,
-      };
+      return failRestore(`Unexpected error fetching chunks: ${message}`, EXIT_NETWORK, startMs);
     }
 
     if (chunkRecords.length === 0) {
@@ -170,10 +176,11 @@ export async function runRestore(
       );
     } catch (err) {
       if (err instanceof ChunkIntegrityError || err instanceof ChunkReassemblyError) {
-        return {
-          result: errorResult(`Integrity error for commit ${commit.commitId}: ${err.message}`),
-          exitCode: EXIT_INTEGRITY,
-        };
+        return failRestore(
+          `Integrity error for commit ${commit.commitId}: ${err.message}`,
+          EXIT_INTEGRITY,
+          startMs
+        );
       }
       throw err;
     }
@@ -184,20 +191,22 @@ export async function runRestore(
     const encrypted = chunkRecords[0]!.encrypted;
     if (encrypted && options.encryption !== 'none') {
       if (!options.decryptionKey || !options.decryptionNonce) {
-        return {
-          result: errorResult('Decryption key and nonce required for encrypted data'),
-          exitCode: EXIT_VALIDATION,
-        };
+        return failRestore(
+          'Decryption key and nonce required for encrypted data',
+          EXIT_VALIDATION,
+          startMs
+        );
       }
       const adapter = createCryptoAdapter(options.encryption);
       try {
         decrypted = await adapter.decrypt(reassembled, options.decryptionKey, options.decryptionNonce);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return {
-          result: errorResult(`Decryption failed for commit ${commit.commitId}: ${message}`),
-          exitCode: EXIT_INTEGRITY,
-        };
+        return failRestore(
+          `Decryption failed for commit ${commit.commitId}: ${message}`,
+          EXIT_INTEGRITY,
+          startMs
+        );
       }
     } else {
       decrypted = reassembled;
@@ -211,10 +220,11 @@ export async function runRestore(
       decompressed = await decompress(decrypted, compressionMode);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return {
-        result: errorResult(`Decompression failed for commit ${commit.commitId}: ${message}`),
-        exitCode: EXIT_INTEGRITY,
-      };
+      return failRestore(
+        `Decompression failed for commit ${commit.commitId}: ${message}`,
+        EXIT_INTEGRITY,
+        startMs
+      );
     }
 
     // Step 6: Deserialize and validate
@@ -223,22 +233,22 @@ export async function runRestore(
       rawBundle = deserializeBundle(decompressed);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return {
-        result: errorResult(`Deserialization failed for commit ${commit.commitId}: ${message}`),
-        exitCode: EXIT_INTEGRITY,
-      };
+      return failRestore(
+        `Deserialization failed for commit ${commit.commitId}: ${message}`,
+        EXIT_INTEGRITY,
+        startMs
+      );
     }
 
     // Verify payload hash against commit record's manifestHash
     const actualHash = sha256(decompressed);
     if (actualHash !== commit.manifestHash) {
-      return {
-        result: errorResult(
-          `Payload hash mismatch for commit ${commit.commitId}: ` +
-            `expected ${commit.manifestHash}, got ${actualHash}`
-        ),
-        exitCode: EXIT_INTEGRITY,
-      };
+      return failRestore(
+        `Payload hash mismatch for commit ${commit.commitId}: ` +
+          `expected ${commit.manifestHash}, got ${actualHash}`,
+        EXIT_INTEGRITY,
+        startMs
+      );
     }
 
     // Patch placeholder fields in the serialized bundle before Zod validation.
@@ -255,10 +265,11 @@ export async function runRestore(
     const parsed = parseBundle(rawBundle);
     if (!parsed.ok) {
       const paths = parsed.errors.map((e) => `${e.path}: ${e.message}`).join('; ');
-      return {
-        result: errorResult(`Bundle validation failed for commit ${commit.commitId}: ${paths}`),
-        exitCode: EXIT_VALIDATION,
-      };
+      return failRestore(
+        `Bundle validation failed for commit ${commit.commitId}: ${paths}`,
+        EXIT_VALIDATION,
+        startMs
+      );
     }
 
     const bundle: BundleV1 = parsed.data;
@@ -300,17 +311,41 @@ export async function runRestore(
     writeFileSync(options.out, JSON.stringify(restoreResult, null, 2));
   }
 
+  vaultLogger.info('restore.complete', {
+    commitCount: commits.length,
+    thoughtformCount: deduped.length,
+    chunksReassembled: totalChunks,
+    dedupedFrom: allThoughtForms.length,
+    lastCommitId: lastCommit.commitId,
+    duration_ms: Date.now() - startMs,
+  });
+
   return { result: restoreResult, exitCode: EXIT_SUCCESS };
 }
 
-function errorResult(message: string): RestoreResult {
+function failRestore(
+  message: string,
+  exitCode: number,
+  startMs: number
+): { result: RestoreResult; exitCode: number } {
+  const failure = classifyFailure(exitCode, message);
+  vaultLogger.error('restore.failed', {
+    exitCode,
+    errorCode: failure.code,
+    errorMessage: failure.message,
+    remediation: failure.remediation,
+    duration_ms: Date.now() - startMs,
+  });
   return {
-    status: 'error',
-    commitCount: 0,
-    thoughtformCount: 0,
-    chunksReassembled: 0,
-    lastCommitId: null,
-    lastCommitCreatedAtMs: null,
-    ...({ error: message } as Record<string, unknown>),
-  } as RestoreResult;
+    result: {
+      status: 'error',
+      commitCount: 0,
+      thoughtformCount: 0,
+      chunksReassembled: 0,
+      lastCommitId: null,
+      lastCommitCreatedAtMs: null,
+      ...({ error: message } as Record<string, unknown>),
+    } as RestoreResult,
+    exitCode,
+  };
 }
