@@ -40,6 +40,8 @@ export interface PolyticianConfig {
   sidecarUrl: string | null;
   distributed: DistributedConfig;
   agentVault?: AgentVaultConfig;
+  /** Enable VetKeys-style encryption for ThoughtForm bundles. */
+  encrypt: boolean;
 }
 
 const DEFAULT_DATA_DIR = join(homedir(), '.polytician');
@@ -100,6 +102,10 @@ export function getConfig(): PolyticianConfig {
     }
   }
 
+  const encryptFlag = process.argv.includes('--encrypt') ||
+    parseBool(process.env['POLYTICIAN_ENCRYPT']) ||
+    (fileConfig as Record<string, unknown>).encrypt === true;
+
   cachedConfig = {
     dataDir,
     dbPath: join(dataDir, 'concepts.db'),
@@ -128,6 +134,7 @@ export function getConfig(): PolyticianConfig {
       asyncIndexSync: parseBool(process.env['POLYTICIAN_ASYNC_INDEX_SYNC']) ?? distFile.asyncIndexSync ?? false,
     },
     agentVault: agentVaultConfig,
+    encrypt: !!encryptFlag,
   };
 
   return cachedConfig;
