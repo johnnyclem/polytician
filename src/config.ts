@@ -27,6 +27,11 @@ export interface DistributedConfig {
   asyncIndexSync: boolean;
 }
 
+export interface BackupConfig {
+  /** Number of saves before auto-backup triggers. 0 disables auto-backup. */
+  threshold: number;
+}
+
 export interface PolyticianConfig {
   dataDir: string;
   dbPath: string;
@@ -40,6 +45,7 @@ export interface PolyticianConfig {
   sidecarUrl: string | null;
   distributed: DistributedConfig;
   agentVault?: AgentVaultConfig;
+  backup: BackupConfig;
 }
 
 const DEFAULT_DATA_DIR = join(homedir(), '.polytician');
@@ -128,6 +134,13 @@ export function getConfig(): PolyticianConfig {
       asyncIndexSync: parseBool(process.env['POLYTICIAN_ASYNC_INDEX_SYNC']) ?? distFile.asyncIndexSync ?? false,
     },
     agentVault: agentVaultConfig,
+    backup: {
+      threshold: parseInt(
+        process.env['POLYTICIAN_BACKUP_THRESHOLD'] ??
+        String((fileConfig as Record<string, unknown>).backupThreshold ?? '50'),
+        10,
+      ) || 50,
+    },
   };
 
   return cachedConfig;
