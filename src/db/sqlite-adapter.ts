@@ -14,6 +14,11 @@ import type {
 export class SqliteAdapter implements DatabaseAdapter {
   private db: DatabaseType;
 
+  /** Expose the underlying better-sqlite3 instance for Drizzle query builder usage. */
+  getRawDb(): DatabaseType {
+    return this.db;
+  }
+
   constructor(dbPath: string) {
     const dir = dirname(dbPath);
     if (!existsSync(dir)) {

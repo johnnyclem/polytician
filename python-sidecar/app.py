@@ -193,6 +193,12 @@ def rebuild_index() -> tuple[Any, int]:
         "total_vectors": int(faiss_index.ntotal),
         "dimension": dim,
     }), 200
+# --- PolyVault routes (gated by POLYVAULT_ENABLED) ---
+if os.environ.get("POLYVAULT_ENABLED", "").lower() in ("1", "true", "yes"):
+    from polyvault_routes import init_polyvault, polyvault_bp
+
+    init_polyvault(get_model)
+    app.register_blueprint(polyvault_bp)
 
 
 if __name__ == "__main__":
