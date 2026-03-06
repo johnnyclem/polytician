@@ -1,0 +1,67 @@
+name: PolyVault Checklist
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+      - labeled
+      - unlabeled
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  enforce-polyvault-checklist:
+    name: Enforce PolyVault checklist on labeled PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR checklist
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const labels = (pr.labels || []).map((l) => (l.name || '').toLowerCase());
+            const requiresPolyVaultChecklist = labels.includes('polyvault');
+
+            if (!requiresPolyVaultChecklist) {
+              core.info('No polyvault label found. Skipping checklist enforcement.');
+              return;
+            }
+
+            const body = pr.body || '';
+            const sectionRegex = /##\s+PolyVault Guardrails Checklist([\s\S]*?)(?:\n##\s+|$)/i;
+            const sectionMatch = body.match(sectionRegex);
+
+            if (!sectionMatch) {
+              core.setFailed(
+                'This PR has the polyvault label, but the "PolyVault Guardrails Checklist" section is missing from the PR description.'
+              );
+              return;
+            }
+
+            const section = sectionMatch[1];
+            const unchecked = section
+              .split('\n')
+              .map((line) => line.trim())
+              .filter((line) => /^-\s+\[\s\]\s+/.test(line));
+
+            if (unchecked.length > 0) {
+              const details = unchecked.map((item) => `- ${item}`).join('\n');
+              core.setFailed(
+                [
+                  'This PR has the polyvault label, but the PolyVault checklist is incomplete.',
+                  'Please complete all checklist items before merge.',
+                  '',
+                  'Unchecked items:',
+                  details,
+                ].join('\n')
+              );
+              return;
+            }
+
+            core.info('PolyVault checklist is complete.');
