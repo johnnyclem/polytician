@@ -59,6 +59,13 @@ export class SqliteAdapter implements DatabaseAdapter {
     `);
 
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `);
+
+    this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS concept_vectors USING vec0(
         concept_id TEXT PRIMARY KEY,
         embedding float[384]
@@ -211,5 +218,20 @@ export class SqliteAdapter implements DatabaseAdapter {
     ).count;
 
     return { conceptCount, vectorCount, mdCount, tfCount, vecCount };
+  }
+
+  getMetadata(key: string): string | null {
+    const row = this.db
+      .prepare('SELECT value FROM metadata WHERE key = ?')
+      .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setMetadata(key: string, value: string): void {
+    this.db
+      .prepare(
+        'INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      )
+      .run(key, value);
   }
 }
