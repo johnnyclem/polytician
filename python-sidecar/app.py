@@ -97,6 +97,14 @@ def similarity() -> tuple[Any, int]:
     return jsonify({"similarity": score}), 200
 
 
+# --- PolyVault routes (gated by POLYVAULT_ENABLED) ---
+if os.environ.get("POLYVAULT_ENABLED", "").lower() in ("1", "true", "yes"):
+    from polyvault_routes import init_polyvault, polyvault_bp
+
+    init_polyvault(get_model)
+    app.register_blueprint(polyvault_bp)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("SIDECAR_PORT", "5001"))
     app.run(host="0.0.0.0", port=port)
