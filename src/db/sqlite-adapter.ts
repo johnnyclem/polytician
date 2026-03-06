@@ -14,6 +14,11 @@ import type {
 export class SqliteAdapter implements DatabaseAdapter {
   private db: DatabaseType;
 
+  /** Expose the underlying better-sqlite3 instance for Drizzle query builder usage. */
+  getRawDb(): DatabaseType {
+    return this.db;
+  }
+
   constructor(dbPath: string) {
     const dir = dirname(dbPath);
     if (!existsSync(dir)) {
@@ -56,6 +61,13 @@ export class SqliteAdapter implements DatabaseAdapter {
 
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
     `);
 
     this.db.exec(`
@@ -211,5 +223,20 @@ export class SqliteAdapter implements DatabaseAdapter {
     ).count;
 
     return { conceptCount, vectorCount, mdCount, tfCount, vecCount };
+  }
+
+  getMetadata(key: string): string | null {
+    const row = this.db
+      .prepare('SELECT value FROM metadata WHERE key = ?')
+      .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setMetadata(key: string, value: string): void {
+    this.db
+      .prepare(
+        'INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      )
+      .run(key, value);
   }
 }
