@@ -113,6 +113,7 @@ export class MemorySyncConnector {
           const existing = await conceptService.read(conceptId).catch(() => null);
           if (
             existing &&
+            existing.updatedAt !== undefined &&
             remoteUpdatedAt !== undefined &&
             existing.updatedAt >= remoteUpdatedAt
           ) {

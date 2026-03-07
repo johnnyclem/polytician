@@ -9,6 +9,7 @@ import { SecretClient } from '../client/secret-client.js';
 import { conceptService } from '../../../services/concept.service.js';
 import { embeddingService } from '../../../services/embedding.service.js';
 import { getAdapter } from '../../../db/client.js';
+import type { ThoughtForm } from '../../../types/thoughtform.js';
 
 /**
  * Shape of a serialized concept inside a vault bundle.
@@ -384,7 +385,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
               id: entry.id,
               namespace: entry.namespace,
               markdown: entry.markdown ?? undefined,
-              thoughtform: entry.thoughtform ?? undefined,
+              thoughtform: entry.thoughtform ? (entry.thoughtform as ThoughtForm) : undefined,
               embedding: entry.embedding ?? undefined,
               tags: entry.tags,
             });
