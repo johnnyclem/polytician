@@ -2,11 +2,34 @@ import type { AgentVaultConfig } from '../config.js';
 import type { AVErrorResponse } from '../types.js';
 import { logger } from '../../../logger.js';
 
+const MAX_URL_LENGTH = 2048;
+const MAX_BODY_SIZE = 10 * 1024 * 1024;
+const ALLOWED_PATHS = [
+  /^\/api\/inference$/,
+  /^\/api\/memory-repo\/branches\/[^/]+$/,
+  /^\/api\/memory-repo\/commits$/,
+  /^\/api\/memory-repo\/tombstone$/,
+  /^\/api\/archival\/upload$/,
+  /^\/api\/secrets\/[^/]+$/,
+];
+
+function validatePath(path: string): void {
+  if (path.length > MAX_URL_LENGTH) {
+    throw new Error(`Path too long: ${path.length} > ${MAX_URL_LENGTH}`);
+  }
+
+  const normalized = path.split('?')[0] ?? path;
+  const isAllowed = ALLOWED_PATHS.some(pattern => pattern.test(normalized));
+  if (!isAllowed) {
+    throw new Error(`Path not in allowlist: ${normalized}`);
+  }
+}
+
 export class AVHttpError extends Error {
   constructor(
     public readonly statusCode: number,
     public readonly avCode: string,
-    message: string,
+    message: string
   ) {
     super(message);
     this.name = 'AVHttpError';
@@ -40,8 +63,10 @@ export class AVHttpClient {
     method: string,
     path: string,
     body: unknown,
-    timeoutMs?: number,
+    timeoutMs?: number
   ): Promise<T> {
+    validatePath(path);
+
     const url = `${this.baseUrl}${path}`;
     const timeout = timeoutMs ?? this.defaultTimeoutMs;
     const controller = new AbortController();
@@ -61,7 +86,11 @@ export class AVHttpClient {
       signal: controller.signal,
     };
     if (body !== undefined) {
-      init.body = JSON.stringify(body);
+      const bodyStr = JSON.stringify(body);
+      if (bodyStr.length > MAX_BODY_SIZE) {
+        throw new Error(`Request body too large: ${bodyStr.length} > ${MAX_BODY_SIZE}`);
+      }
+      init.body = bodyStr;
     }
 
     const start = Date.now();
@@ -73,12 +102,29 @@ export class AVHttpClient {
       if (!res.ok) {
         let errorBody: AVErrorResponse = { error: res.statusText, code: 'UNKNOWN' };
         try {
-          errorBody = await res.json() as AVErrorResponse;
-        } catch { /* ignore parse error */ }
+          errorBody = (await res.json()) as AVErrorResponse;
+        } catch {
+          /* ignore parse error */
+        }
         throw new AVHttpError(res.status, errorBody.code, errorBody.error);
       }
 
-      return await res.json() as T;
+      const json = (await res.json()) as {
+        success?: boolean;
+        data?: T;
+        error?: { message?: string };
+      };
+
+      if (json && typeof json === 'object' && 'success' in json) {
+        if (json.success === false) {
+          throw new AVHttpError(res.status, 'API_ERROR', json.error?.message ?? 'Unknown error');
+        }
+        if ('data' in json) {
+          return json.data as T;
+        }
+      }
+
+      return json as T;
     } catch (err) {
       if (err instanceof AVHttpError) throw err;
       logger.error('av-http error', err, { method, path });
