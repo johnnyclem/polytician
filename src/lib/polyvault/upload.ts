@@ -1,4 +1,5 @@
 import { idempotencyKey } from './idempotency.js';
+import type { NetworkConfig } from '../../polyvault/types.js';
 
 /**
  * PolyVault chunk upload + commit finalization.
@@ -60,6 +61,7 @@ export interface UploadBundleRequest {
   dedupeKey: string;
   manifestHash: string;
   chunks: ChunkInput[];
+  networkConfig?: NetworkConfig;
 }
 
 export interface UploadResult {
@@ -87,12 +89,44 @@ export class FinalizeError extends Error {
   }
 }
 
+// --- Retry with exponential backoff ---
+
+const DEFAULT_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
+
+function jitter(delayMs: number): number {
+  return delayMs + Math.floor(Math.random() * delayMs * 0.25);
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  maxAttempts: number,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts - 1) {
+        const baseDelay = DEFAULT_RETRY_DELAYS_MS[Math.min(attempt, DEFAULT_RETRY_DELAYS_MS.length - 1)]!;
+        await sleep(jitter(baseDelay));
+      }
+    }
+  }
+  throw lastError;
+}
+
 // --- Upload orchestrator ---
 
 /**
  * Upload all chunks for a bundle and finalize the commit.
  *
  * Chunks are uploaded sequentially with idempotency keys per the PRD.
+ * Chunk uploads use exponential backoff (250ms, 500ms, 1s, 2s) with jitter.
  * If the commit is a duplicate (same dedupeKey already finalized),
  * the result indicates `accepted: false` with the existing commitId.
  */
@@ -101,25 +135,29 @@ export async function uploadBundle(
   req: UploadBundleRequest
 ): Promise<UploadResult> {
   let chunksUploaded = 0;
+  const maxAttempts = req.networkConfig?.retryAttempts ?? DEFAULT_RETRY_DELAYS_MS.length + 1;
 
   for (const chunk of req.chunks) {
     const idemKey = idempotencyKey(req.commitId, chunk.chunkIndex, chunk.chunkHash);
 
-    const result = await client.putChunk({
-      idempotencyKey: idemKey,
-      commitId: req.commitId,
-      bundleId: req.bundleId,
-      chunkIndex: chunk.chunkIndex,
-      chunkCount: chunk.chunkCount,
-      chunkHash: chunk.chunkHash,
-      compressed: chunk.compressed,
-      encrypted: chunk.encrypted,
-      payload: chunk.payload,
-    });
+    await retryWithBackoff(async () => {
+      const result = await client.putChunk({
+        idempotencyKey: idemKey,
+        commitId: req.commitId,
+        bundleId: req.bundleId,
+        chunkIndex: chunk.chunkIndex,
+        chunkCount: chunk.chunkCount,
+        chunkHash: chunk.chunkHash,
+        compressed: chunk.compressed,
+        encrypted: chunk.encrypted,
+        payload: chunk.payload,
+      });
 
-    if (result.ok === false) {
-      throw new ChunkUploadError(chunk.chunkIndex, result.error);
-    }
+      if (result.ok === false) {
+        throw new ChunkUploadError(chunk.chunkIndex, result.error);
+      }
+    }, maxAttempts);
+
     chunksUploaded++;
   }
 

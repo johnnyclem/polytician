@@ -15,6 +15,8 @@ import {
 import { vaultLogger, classifyFailure } from '../../polyvault/logger.js';
 import type { ThoughtFormV1 } from '../../schemas/thoughtform.js';
 import type { BundleV1 } from '../../schemas/bundle.js';
+import type { NetworkProfile } from '../../polyvault/types.js';
+import { getNetworkConfig } from '../../polyvault/types.js';
 
 // --- Exit codes per PRD ---
 
@@ -43,6 +45,8 @@ export interface BackupOptions {
   out?: string;
   /** Encryption key (required if encrypt != 'none'). */
   encryptionKey?: Uint8Array;
+  /** Network profile: 'local' (lower timeouts) or 'ic' (higher timeouts). */
+  network?: NetworkProfile;
 }
 
 // --- Backup result (JSON output) ---
@@ -257,6 +261,7 @@ export async function runBackup(
 
   // Step 6 & 7: Upload and finalize
   try {
+    const networkConfig = options.network ? getNetworkConfig(options.network) : undefined;
     const uploadResult = await uploadBundle(client, {
       bundleId,
       commitId,
@@ -264,6 +269,7 @@ export async function runBackup(
       dedupeKey,
       manifestHash: payloadHash,
       chunks: chunkInputs,
+      networkConfig,
     });
 
     const backupResult: BackupResult = {

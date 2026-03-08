@@ -18,6 +18,8 @@ import { upsertThoughtforms, extractEmbeddingText, type UpsertResult } from '../
 import type { DatabaseAdapter } from '../../db/adapter.js';
 import type { ThoughtFormV1 } from '../../schemas/thoughtform.js';
 import type { BundleV1 } from '../../schemas/bundle.js';
+import type { NetworkProfile } from '../../polyvault/types.js';
+import { getNetworkConfig } from '../../polyvault/types.js';
 
 // --- Exit codes per PRD ---
 
@@ -46,6 +48,12 @@ export interface RestoreOptions {
   decryptionNonce?: Uint8Array;
   /** Output path for restore manifest JSON (optional). */
   out?: string;
+  /** Network profile: 'local' (lower timeouts) or 'ic' (higher timeouts). */
+  network?: NetworkProfile;
+  /** Filter: only restore ThoughtForms with updatedAtMs > this value. No-op stub — reserved for future use. */
+  filterUpdatedSince?: number;
+  /** Filter: only restore ThoughtForms whose id starts with this prefix. No-op stub — reserved for future use. */
+  filterIdPrefix?: string;
 }
 
 // --- Restore result ---
