@@ -240,6 +240,11 @@ export async function createServer(): Promise<McpServer> {
     }
   );
 
+  // --- AgentVault Backup ---
+
+  const { registerBackupTool } = await import('./mcp/tools/agentvault.js');
+  registerBackupTool(server);
+
   // Register AgentVault tools if integration is configured
   const cfg = getConfig();
   if (cfg.agentVault) {

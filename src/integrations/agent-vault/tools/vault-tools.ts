@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { readFile } from 'node:fs/promises';
 import type { AgentVaultConfig } from '../config.js';
 import { InferenceClient } from '../client/inference-client.js';
 import { MemoryRepoClient } from '../client/memory-repo-client.js';
@@ -7,6 +8,87 @@ import { ArweaveUploadClient } from '../client/arweave-client.js';
 import { SecretClient } from '../client/secret-client.js';
 import { conceptService } from '../../../services/concept.service.js';
 import { embeddingService } from '../../../services/embedding.service.js';
+import { getAdapter } from '../../../db/client.js';
+import type { ThoughtForm } from '../../../types/thoughtform.js';
+
+/**
+ * Shape of a serialized concept inside a vault bundle.
+ */
+interface BundleConcept {
+  id: string;
+  namespace?: string;
+  markdown?: string | null;
+  thoughtform?: Record<string, unknown> | null;
+  embedding?: number[] | null;
+  tags?: string[];
+}
+
+interface VaultBundle {
+  version: number;
+  exportedAt: string;
+  concepts: BundleConcept[];
+}
+
+/**
+ * Deserialize a raw bundle (JSON object or string) into a typed VaultBundle.
+ * Validates required structure and returns the parsed bundle.
+ */
+function deserializeBundle(raw: unknown): VaultBundle {
+  const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+  if (!obj || typeof obj !== 'object') {
+    throw new Error('Bundle must be a JSON object');
+  }
+
+  const bundle = obj as Record<string, unknown>;
+
+  if (!Array.isArray(bundle.concepts)) {
+    throw new Error('Bundle must contain a "concepts" array');
+  }
+
+  const concepts = (bundle.concepts as Record<string, unknown>[]).map((c, i) => {
+    if (!c.id || typeof c.id !== 'string') {
+      throw new Error(`Bundle concept at index ${i} is missing a valid "id"`);
+    }
+    return {
+      id: c.id,
+      namespace: typeof c.namespace === 'string' ? c.namespace : undefined,
+      markdown: typeof c.markdown === 'string' ? c.markdown : null,
+      thoughtform: c.thoughtform && typeof c.thoughtform === 'object'
+        ? (c.thoughtform as Record<string, unknown>)
+        : null,
+      embedding: Array.isArray(c.embedding) ? (c.embedding as number[]) : null,
+      tags: Array.isArray(c.tags)
+        ? (c.tags as unknown[]).filter((t): t is string => typeof t === 'string')
+        : [],
+    } satisfies BundleConcept;
+  });
+
+  return {
+    version: typeof bundle.version === 'number' ? bundle.version : 1,
+    exportedAt: typeof bundle.exportedAt === 'string' ? bundle.exportedAt : new Date().toISOString(),
+    concepts,
+  };
+}
+
+/**
+ * Rebuild the vector index for a set of concept IDs by re-upserting their
+ * embeddings into the adapter's vector table.
+ */
+async function rebuildVectorIndex(conceptIds: string[]): Promise<number> {
+  const adapter = getAdapter();
+  let rebuilt = 0;
+
+  for (const id of conceptIds) {
+    const row = await adapter.findConcept(id);
+    if (row?.embedding) {
+      await adapter.upsertVector(id, row.embedding);
+      rebuilt++;
+    }
+  }
+
+  return rebuilt;
+}
 
 export function registerVaultTools(server: McpServer, config: AgentVaultConfig): void {
   const inferClient = new InferenceClient(config);
@@ -234,6 +316,98 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
               conceptKeys: branch.entries
                 .filter(e => e.key.startsWith('concepts/'))
                 .map(e => e.key),
+            }),
+          }],
+        };
+      } catch (err) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
+        };
+      }
+    }
+  );
+
+  // --- vault_restore ---
+
+  server.tool(
+    'vault_restore',
+    'Restore concepts and vector index from a vault bundle. Accepts either inline bundle JSON or a file path to a bundle. Deserializes all concepts, saves them, and rebuilds the FAISS vector index.',
+    {
+      bundle: z.any().optional().describe(
+        'Inline bundle JSON object containing { version, exportedAt, concepts: [...] }'
+      ),
+      path: z.string().optional().describe(
+        'File path to a JSON bundle file. Mutually exclusive with "bundle".'
+      ),
+    },
+    async ({ bundle, path }) => {
+      try {
+        if (!bundle && !path) {
+          return {
+            isError: true,
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ error: 'Provide either "bundle" (inline JSON) or "path" (file path)' }),
+            }],
+          };
+        }
+
+        if (bundle && path) {
+          return {
+            isError: true,
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ error: '"bundle" and "path" are mutually exclusive — provide one, not both' }),
+            }],
+          };
+        }
+
+        // Load raw bundle data
+        let raw: unknown;
+        if (path) {
+          const fileContents = await readFile(path, 'utf-8');
+          raw = JSON.parse(fileContents);
+        } else {
+          raw = bundle;
+        }
+
+        // Deserialize bundle
+        const parsed = deserializeBundle(raw);
+
+        // Restore concepts
+        const restoredIds: string[] = [];
+        const errors: Array<{ id: string; error: string }> = [];
+
+        for (const entry of parsed.concepts) {
+          try {
+            await conceptService.save({
+              id: entry.id,
+              namespace: entry.namespace,
+              markdown: entry.markdown ?? undefined,
+              thoughtform: entry.thoughtform ? (entry.thoughtform as ThoughtForm) : undefined,
+              embedding: entry.embedding ?? undefined,
+              tags: entry.tags,
+            });
+            restoredIds.push(entry.id);
+          } catch (err) {
+            errors.push({ id: entry.id, error: String(err) });
+          }
+        }
+
+        // Rebuild vector index for restored concepts
+        const vectorsRebuilt = await rebuildVectorIndex(restoredIds);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              restored: true,
+              bundleVersion: parsed.version,
+              exportedAt: parsed.exportedAt,
+              conceptsRestored: restoredIds.length,
+              vectorsRebuilt,
+              errors: errors.length > 0 ? errors : undefined,
             }),
           }],
         };

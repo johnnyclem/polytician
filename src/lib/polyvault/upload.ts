@@ -1,0 +1,181 @@
+import { idempotencyKey } from './idempotency.js';
+import type { NetworkConfig } from '../../polyvault/types.js';
+
+/**
+ * PolyVault chunk upload + commit finalization.
+ *
+ * This module provides a CanisterClient interface and an uploadBundle()
+ * orchestrator that uploads chunks idempotently then finalizes the commit.
+ * It is intentionally side-effect-free beyond calling the canister methods,
+ * making it testable with an in-memory stub.
+ */
+
+// --- Canister client interface ---
+
+export interface PutChunkRequest {
+  idempotencyKey: string;
+  commitId: string;
+  bundleId: string;
+  chunkIndex: number;
+  chunkCount: number;
+  chunkHash: string;
+  compressed: boolean;
+  encrypted: boolean;
+  payload: Uint8Array;
+}
+
+export interface FinalizeResult {
+  accepted: boolean;
+  duplicateOf: string | null;
+}
+
+export type CanisterResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+export interface CanisterClient {
+  putChunk(req: PutChunkRequest): Promise<CanisterResult<void>>;
+  finalizeCommit(
+    commitId: string,
+    parentCommitId: string | null,
+    dedupeKey: string,
+    manifestHash: string,
+    expectedChunkCount: number
+  ): Promise<CanisterResult<FinalizeResult>>;
+  getLatestCommit(): Promise<{ commitId: string; createdAtMs: number } | null>;
+}
+
+// --- Upload types ---
+
+export interface ChunkInput {
+  chunkIndex: number;
+  chunkCount: number;
+  chunkHash: string;
+  compressed: boolean;
+  encrypted: boolean;
+  payload: Uint8Array;
+}
+
+export interface UploadBundleRequest {
+  bundleId: string;
+  commitId: string;
+  parentCommitId: string | null;
+  dedupeKey: string;
+  manifestHash: string;
+  chunks: ChunkInput[];
+  networkConfig?: NetworkConfig;
+}
+
+export interface UploadResult {
+  accepted: boolean;
+  duplicateOf: string | null;
+  chunksUploaded: number;
+}
+
+// --- Errors ---
+
+export class ChunkUploadError extends Error {
+  constructor(
+    public readonly chunkIndex: number,
+    public readonly reason: string
+  ) {
+    super(`Chunk ${chunkIndex} upload failed: ${reason}`);
+    this.name = 'ChunkUploadError';
+  }
+}
+
+export class FinalizeError extends Error {
+  constructor(public readonly reason: string) {
+    super(`Finalize commit failed: ${reason}`);
+    this.name = 'FinalizeError';
+  }
+}
+
+// --- Retry with exponential backoff ---
+
+const DEFAULT_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
+
+function jitter(delayMs: number): number {
+  return delayMs + Math.floor(Math.random() * delayMs * 0.25);
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  maxAttempts: number,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts - 1) {
+        const baseDelay = DEFAULT_RETRY_DELAYS_MS[Math.min(attempt, DEFAULT_RETRY_DELAYS_MS.length - 1)]!;
+        await sleep(jitter(baseDelay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+// --- Upload orchestrator ---
+
+/**
+ * Upload all chunks for a bundle and finalize the commit.
+ *
+ * Chunks are uploaded sequentially with idempotency keys per the PRD.
+ * Chunk uploads use exponential backoff (250ms, 500ms, 1s, 2s) with jitter.
+ * If the commit is a duplicate (same dedupeKey already finalized),
+ * the result indicates `accepted: false` with the existing commitId.
+ */
+export async function uploadBundle(
+  client: CanisterClient,
+  req: UploadBundleRequest
+): Promise<UploadResult> {
+  let chunksUploaded = 0;
+  const maxAttempts = req.networkConfig?.retryAttempts ?? DEFAULT_RETRY_DELAYS_MS.length + 1;
+
+  for (const chunk of req.chunks) {
+    const idemKey = idempotencyKey(req.commitId, chunk.chunkIndex, chunk.chunkHash);
+
+    await retryWithBackoff(async () => {
+      const result = await client.putChunk({
+        idempotencyKey: idemKey,
+        commitId: req.commitId,
+        bundleId: req.bundleId,
+        chunkIndex: chunk.chunkIndex,
+        chunkCount: chunk.chunkCount,
+        chunkHash: chunk.chunkHash,
+        compressed: chunk.compressed,
+        encrypted: chunk.encrypted,
+        payload: chunk.payload,
+      });
+
+      if (result.ok === false) {
+        throw new ChunkUploadError(chunk.chunkIndex, result.error);
+      }
+    }, maxAttempts);
+
+    chunksUploaded++;
+  }
+
+  const finalResult = await client.finalizeCommit(
+    req.commitId,
+    req.parentCommitId,
+    req.dedupeKey,
+    req.manifestHash,
+    req.chunks.length
+  );
+
+  if (finalResult.ok === false) {
+    throw new FinalizeError(finalResult.error);
+  }
+
+  return {
+    accepted: finalResult.value.accepted,
+    duplicateOf: finalResult.value.duplicateOf,
+    chunksUploaded,
+  };
+}

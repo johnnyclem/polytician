@@ -7,6 +7,7 @@ import { startHealthServer } from './health.js';
 import { logger } from './logger.js';
 import { indexSyncService } from './services/index-sync.service.js';
 import { conversionService } from './services/conversion.service.js';
+import { backupService } from './services/backup.service.js';
 import { getConfig, resetConfig } from './config.js';
 import type { AgentVaultEventBridge } from './integrations/agent-vault/connectors/event-bridge.js';
 
@@ -59,6 +60,9 @@ async function main(): Promise<void> {
     });
   }
 
+  // Start auto-backup service (always active; threshold=0 disables it)
+  backupService.start();
+
   // Create MCP server with all tools registered
   const server = await createServer();
 
@@ -70,6 +74,7 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = (): void => {
     logger.info('shutdown initiated');
+    backupService.stop();
     avBridge?.stop();
     indexSyncService.stop();
     healthServer.close();

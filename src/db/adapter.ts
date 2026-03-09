@@ -93,4 +93,10 @@ export interface DatabaseAdapter {
   // --- Stats ---
 
   getStats(namespace?: string): StatsResult | Promise<StatsResult>;
+
+  // --- Metadata (key-value store for internal bookkeeping) ---
+
+  getMetadata(key: string): string | null | Promise<string | null>;
+
+  setMetadata(key: string, value: string): void | Promise<void>;
 }

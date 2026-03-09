@@ -22,7 +22,8 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run quality && npm run test && npm run build",
     "audit:fix": "npm audit fix",
-    "security:scan": "npm audit --audit-level=moderate"
+    "security:scan": "npm audit --audit-level=moderate",
+    "agentvault-sync": "tsx bin/agentvault-sync.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",
