@@ -155,6 +155,132 @@ describe('Python Sidecar Integration', () => {
     });
   });
 
+  describe('rebuild-index endpoint', () => {
+    it('should rebuild FAISS index with new ThoughtForm IDs', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          indexed_ids: ['tf-001', 'tf-002'],
+          total_vectors: 2,
+          dimension: 384,
+        }),
+      });
+
+      const resp = await fetch(`${SIDECAR_URL}/rebuild-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: ['tf-001', 'tf-002'],
+          texts: ['first concept text', 'second concept text'],
+        }),
+      });
+      const data = await resp.json();
+
+      expect(data.status).toBe('ok');
+      expect(data.indexed_ids).toEqual(['tf-001', 'tf-002']);
+      expect(data.total_vectors).toBe(2);
+      expect(data.dimension).toBe(384);
+    });
+
+    it('should reject mismatched ids and texts lengths', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'ids and texts must have the same length' }),
+      });
+
+      const resp = await fetch(`${SIDECAR_URL}/rebuild-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: ['tf-001', 'tf-002'],
+          texts: ['only one text'],
+        }),
+      });
+
+      expect(resp.ok).toBe(false);
+      expect(resp.status).toBe(400);
+    });
+
+    it('should reject empty ids list', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'ids must be a non-empty list' }),
+      });
+
+      const resp = await fetch(`${SIDECAR_URL}/rebuild-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [], texts: [] }),
+      });
+
+      expect(resp.ok).toBe(false);
+      expect(resp.status).toBe(400);
+    });
+
+    it('should handle sidecar error during rebuild', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: 'Internal server error' }),
+      });
+
+      const resp = await fetch(`${SIDECAR_URL}/rebuild-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: ['tf-001'],
+          texts: ['some text'],
+        }),
+      });
+
+      expect(resp.ok).toBe(false);
+      expect(resp.status).toBe(500);
+    });
+
+    it('should accumulate vectors across multiple rebuilds', async () => {
+      // First rebuild
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          indexed_ids: ['tf-001'],
+          total_vectors: 1,
+          dimension: 384,
+        }),
+      });
+
+      const resp1 = await fetch(`${SIDECAR_URL}/rebuild-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ['tf-001'], texts: ['first'] }),
+      });
+      const data1 = await resp1.json();
+      expect(data1.total_vectors).toBe(1);
+
+      // Second rebuild adds more vectors
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          indexed_ids: ['tf-002', 'tf-003'],
+          total_vectors: 3,
+          dimension: 384,
+        }),
+      });
+
+      const resp2 = await fetch(`${SIDECAR_URL}/rebuild-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ['tf-002', 'tf-003'], texts: ['second', 'third'] }),
+      });
+      const data2 = await resp2.json();
+      expect(data2.total_vectors).toBe(3);
+    });
+  });
+
   describe('edge cases', () => {
     it('should handle unicode text in embeddings', async () => {
       const fakeEmb = [Array(384).fill(0.01)];

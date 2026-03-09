@@ -54,6 +54,13 @@ export class PostgresAdapter implements DatabaseAdapter {
     `);
 
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `);
+
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS concept_vectors (
         concept_id TEXT PRIMARY KEY REFERENCES concepts(id) ON DELETE CASCADE,
         embedding vector(384) NOT NULL
@@ -277,6 +284,22 @@ export class PostgresAdapter implements DatabaseAdapter {
       tfCount: Number(tf.rows[0].count),
       vecCount: Number(vec.rows[0].count),
     };
+  }
+
+  async getMetadata(key: string): Promise<string | null> {
+    const result = await this.pool.query(
+      'SELECT value FROM metadata WHERE key = $1',
+      [key],
+    );
+    if (result.rows.length === 0) return null;
+    return result.rows[0].value as string;
+  }
+
+  async setMetadata(key: string, value: string): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO metadata (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+      [key, value],
+    );
   }
 
   /** Normalize PostgreSQL row types to match the ConceptRow interface. */
