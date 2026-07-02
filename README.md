@@ -1514,6 +1514,18 @@ npm test
 
 ---
 
+## Ecosystem
+
+Polytician integrates with [AgentVault](https://github.com/johnnyclem/agentvault) as an
+on-chain backup/sync target, inference/secrets provider, and MCP-based semantic memory
+source for AgentVault's orchestrator. See:
+
+- [`AGENTVAULT_COMPATIBILITY_PRD.md`](AGENTVAULT_COMPATIBILITY_PRD.md) — the spec for AgentVault's side of this integration
+- [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md) — the encrypted backup/restore bridge (PolyVault)
+- [`docs/ecosystem/executive-summary.md`](docs/ecosystem/executive-summary.md) and [`docs/ecosystem/engineering-guide.md`](docs/ecosystem/engineering-guide.md) — cross-repo ecosystem evaluation, including what's actually shipped vs. still aspirational on AgentVault's side
+
+---
+
 ## Contributing
 
 Contributions are welcome! Please follow these steps:
