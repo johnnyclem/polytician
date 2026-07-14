@@ -14,12 +14,9 @@ import {
   type CommitRecord,
 } from '../../lib/polyvault/download.js';
 import { vaultLogger, classifyFailure } from '../../polyvault/logger.js';
-import { upsertThoughtforms, extractEmbeddingText, type UpsertResult } from '../../storage/sqlite-upsert.js';
-import type { DatabaseAdapter } from '../../db/adapter.js';
 import type { ThoughtFormV1 } from '../../schemas/thoughtform.js';
 import type { BundleV1 } from '../../schemas/bundle.js';
 import type { NetworkProfile } from '../../polyvault/types.js';
-import { getNetworkConfig } from '../../polyvault/types.js';
 
 // --- Exit codes per PRD ---
 

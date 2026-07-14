@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ThoughtFormSchema, ThoughtFormInputSchema } from './thoughtform.js';
+import { ThoughtFormSchema } from './thoughtform.js';
 
 export const VECTOR_DIMENSION = 384;
 

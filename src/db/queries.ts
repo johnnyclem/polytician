@@ -1,5 +1,5 @@
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { gt, isNotNull, desc } from 'drizzle-orm';
+import { gt, desc } from 'drizzle-orm';
 import { concepts } from './schema.js';
 import { getAdapter } from './client.js';
 import { SqliteAdapter } from './sqlite-adapter.js';

@@ -1,6 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { gunzipSync } from 'node:zlib';
-import { serializeBundle } from '../src/storage/thoughtform.js';
+import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
+import { ConceptService } from '../src/services/concept.service.js';
+import {
+  serializeBundle,
+  serializeThoughtFormsBundle,
+  type ThoughtFormBundle,
+} from '../src/storage/thoughtform.js';
 import type { ThoughtForm } from '../src/types/thoughtform.js';
 
 function makeThoughtForm(overrides?: Partial<ThoughtForm>): ThoughtForm {
@@ -17,14 +23,10 @@ function makeThoughtForm(overrides?: Partial<ThoughtForm>): ThoughtForm {
     },
     entities: [],
     relationships: [],
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
-import { ConceptService } from '../src/services/concept.service.js';
-import {
-  serializeThoughtFormsBundle,
-  type ThoughtFormBundle,
-} from '../src/storage/thoughtform.js';
-import type { ThoughtForm } from '../src/types/thoughtform.js';
+    contextGraph: {},
+    ...overrides,
+  };
+}
 
 function makeTf(index: number, overrides?: Partial<ThoughtForm>): ThoughtForm {
   const id = `${index}0000000-0000-4000-a000-000000000000`;
@@ -131,6 +133,9 @@ describe('serializeBundle', () => {
     // Acceptance criteria: compressed < 60% of raw
     const ratio = result.compressedSize / result.rawSize;
     expect(ratio).toBeLessThan(0.6);
+  });
+});
+
 let service: ConceptService;
 
 describe('serializeThoughtFormsBundle', () => {

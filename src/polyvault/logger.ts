@@ -11,7 +11,7 @@
  * chunkSizeBytes), timestamps, and boolean flags (compressed, encrypted).
  */
 
-import { logger, type LogLevel } from '../logger.js';
+import { logger } from '../logger.js';
 
 // --- Redaction ---
 
