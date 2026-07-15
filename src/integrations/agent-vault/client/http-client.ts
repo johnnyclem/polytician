@@ -36,15 +36,24 @@ export class AVHttpError extends Error {
   }
 }
 
+/** HTTP status codes considered transient and safe to retry. */
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export class AVHttpClient {
   private readonly baseUrl: string;
   private readonly token: string | undefined;
   private readonly defaultTimeoutMs: number;
+  private readonly maxRetries: number;
 
   constructor(config: AgentVaultConfig) {
     this.baseUrl = config.apiBaseUrl.replace(/\/$/, '');
     this.token = config.apiToken;
     this.defaultTimeoutMs = config.inference.timeoutMs;
+    this.maxRetries = config.inference.maxRetries;
   }
 
   async get<T>(path: string, timeoutMs?: number): Promise<T> {
@@ -67,6 +76,43 @@ export class AVHttpClient {
   ): Promise<T> {
     validatePath(path);
 
+    let bodyStr: string | undefined;
+    if (body !== undefined) {
+      bodyStr = JSON.stringify(body);
+      if (bodyStr.length > MAX_BODY_SIZE) {
+        throw new Error(`Request body too large: ${bodyStr.length} > ${MAX_BODY_SIZE}`);
+      }
+    }
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      if (attempt > 0) {
+        await sleep(250 * 2 ** (attempt - 1));
+        logger.debug('av-http retry', { method, path, attempt });
+      }
+      try {
+        return await this.attempt<T>(method, path, bodyStr, timeoutMs);
+      } catch (err) {
+        lastError = err;
+        // Only transient failures are retried: network errors/timeouts and
+        // gateway-style 5xx. Application errors (4xx, envelope errors) are not.
+        const retryable = !(err instanceof AVHttpError) || RETRYABLE_STATUSES.has(err.statusCode);
+        if (!retryable || attempt === this.maxRetries) {
+          logger.error('av-http error', err, { method, path, attempt });
+          throw err;
+        }
+      }
+    }
+    // Unreachable: the loop always returns or throws.
+    throw lastError;
+  }
+
+  private async attempt<T>(
+    method: string,
+    path: string,
+    bodyStr: string | undefined,
+    timeoutMs?: number
+  ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const timeout = timeoutMs ?? this.defaultTimeoutMs;
     const controller = new AbortController();
@@ -85,11 +131,7 @@ export class AVHttpClient {
       headers,
       signal: controller.signal,
     };
-    if (body !== undefined) {
-      const bodyStr = JSON.stringify(body);
-      if (bodyStr.length > MAX_BODY_SIZE) {
-        throw new Error(`Request body too large: ${bodyStr.length} > ${MAX_BODY_SIZE}`);
-      }
+    if (bodyStr !== undefined) {
       init.body = bodyStr;
     }
 
@@ -109,7 +151,13 @@ export class AVHttpClient {
         throw new AVHttpError(res.status, errorBody.code, errorBody.error);
       }
 
-      const json = (await res.json()) as {
+      // Tolerate empty bodies (204 or bodyless 200) for void-style endpoints.
+      const text = await res.text();
+      if (res.status === 204 || text.length === 0) {
+        return undefined as T;
+      }
+
+      const json = JSON.parse(text) as {
         success?: boolean;
         data?: T;
         error?: { message?: string };
@@ -125,10 +173,6 @@ export class AVHttpClient {
       }
 
       return json as T;
-    } catch (err) {
-      if (err instanceof AVHttpError) throw err;
-      logger.error('av-http error', err, { method, path });
-      throw err;
     } finally {
       clearTimeout(timer);
     }

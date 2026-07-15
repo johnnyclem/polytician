@@ -7,13 +7,9 @@ import {
 import { getAdapter } from '../db/client.js';
 import { rebuildFaissIndex } from '../sidecar/faiss.js';
 import { logger } from '../logger.js';
+import { serializeEmbedding } from '../db/embedding-codec.js';
 
-function serializeEmbedding(embedding: number[]): Buffer {
-  const floats = new Float32Array(embedding);
-  return Buffer.from(floats.buffer);
-}
-
-type PendingUpdate = () => void;
+type PendingUpdate = () => void | Promise<void>;
 
 /**
  * IndexSyncService processes vector index updates asynchronously via the
@@ -98,21 +94,25 @@ export class IndexSyncService {
   private scheduleFlush(): void {
     if (this.processing) return;
     this.processing = true;
-    setImmediate(() => this.flush());
+    setImmediate(() => {
+      void this.flush();
+    });
   }
 
-  private flush(): void {
+  private async flush(): Promise<void> {
     const batch = this.pendingUpdates.splice(0);
-    this.processing = false;
 
     for (const update of batch) {
       try {
-        update();
+        // Await so async adapters (Postgres) cannot leak unhandled rejections.
+        await update();
       } catch {
         // Errors are swallowed at this layer; in production, emit a dead-letter
         // event or forward to an observability sink.
       }
     }
+
+    this.processing = false;
 
     // If more items were enqueued while flushing, schedule another pass.
     if (this.pendingUpdates.length > 0) {
@@ -129,9 +129,7 @@ export class IndexSyncService {
    * rather than propagated so deserialization is not blocked by sidecar
    * availability.
    */
-  async rebuildAfterDeserialize(
-    entries: Array<{ id: string; text: string }>,
-  ): Promise<void> {
+  async rebuildAfterDeserialize(entries: Array<{ id: string; text: string }>): Promise<void> {
     if (entries.length === 0) return;
 
     const ids = entries.map(e => e.id);
@@ -146,16 +144,16 @@ export class IndexSyncService {
     }
   }
 
-  private syncVector(conceptId: string, embedding: number[] | null): void {
+  private async syncVector(conceptId: string, embedding: number[] | null): Promise<void> {
     if (!embedding) return;
     const adapter = getAdapter();
     const buf = serializeEmbedding(embedding);
-    adapter.upsertVector(conceptId, buf);
+    await adapter.upsertVector(conceptId, buf);
   }
 
-  private removeVector(conceptId: string): void {
+  private async removeVector(conceptId: string): Promise<void> {
     const adapter = getAdapter();
-    adapter.deleteVector(conceptId);
+    await adapter.deleteVector(conceptId);
   }
 }
 

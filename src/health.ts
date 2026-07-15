@@ -2,6 +2,8 @@ import { createServer, type Server } from 'node:http';
 import { getAdapter } from './db/client.js';
 import { getConfig } from './config.js';
 import { logger } from './logger.js';
+import { VECTOR_DIMENSION } from './types/concept.js';
+import { serializeEmbedding } from './db/embedding-codec.js';
 
 type CheckStatus = 'ok' | 'error' | 'not_configured';
 
@@ -20,25 +22,22 @@ interface HealthResponse {
   timestamp: string;
 }
 
-function checkDatabase(): CheckResult {
+async function checkDatabase(): Promise<CheckResult> {
   try {
     const adapter = getAdapter();
     // Quick check: getStats works if DB is healthy
-    adapter.getStats();
+    await adapter.getStats();
     return { status: 'ok' };
   } catch (err) {
     return { status: 'error', error: err instanceof Error ? err.message : String(err) };
   }
 }
 
-function checkVectorIndex(): CheckResult {
+async function checkVectorIndex(): Promise<CheckResult> {
   try {
     const adapter = getAdapter();
-    // Quick check: vector search with empty query should not throw
-    adapter.vectorSearch(
-      Buffer.from(new Float32Array(384).buffer),
-      1,
-    );
+    // Quick check: vector search with a zero query should not throw
+    await adapter.vectorSearch(serializeEmbedding(new Array<number>(VECTOR_DIMENSION).fill(0)), 1);
     return { status: 'ok' };
   } catch (err) {
     return { status: 'error', error: err instanceof Error ? err.message : String(err) };
@@ -52,7 +51,9 @@ async function checkSidecar(sidecarUrl: string | null): Promise<CheckResult> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(sidecarUrl, { signal: controller.signal });
+    // The sidecar serves its liveness probe on /health (there is no / route).
+    const base = sidecarUrl.replace(/\/+$/, '');
+    const res = await fetch(`${base}/health`, { signal: controller.signal });
     clearTimeout(timeout);
     if (res.ok) return { status: 'ok' };
     return { status: 'error', error: `HTTP ${res.status.toString()}` };
@@ -71,12 +72,11 @@ export function startHealthServer(): Server {
       return;
     }
 
-    const db = checkDatabase();
-    const vec = checkVectorIndex();
-
-    checkSidecar(config.sidecarUrl)
-      .then((sidecar) => {
-        const allOk = db.status === 'ok' && vec.status === 'ok' &&
+    Promise.all([checkDatabase(), checkVectorIndex(), checkSidecar(config.sidecarUrl)])
+      .then(([db, vec, sidecar]) => {
+        const allOk =
+          db.status === 'ok' &&
+          vec.status === 'ok' &&
           (sidecar.status === 'ok' || sidecar.status === 'not_configured');
 
         const body: HealthResponse = {

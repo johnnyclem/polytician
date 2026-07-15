@@ -6,10 +6,10 @@ A local AI agent that stores and converts concepts between three representations
 
 ## Key Features
 
-- **Multi-Representation Storage**: Store concepts as 768-dimensional vectors, human-readable markdown, or structured ThoughtForm JSON
-- **Bidirectional Conversion**: Convert between any two representations with 6 conversion commands
-- **Semantic Search**: Find similar concepts using FAISS-powered vector similarity search
-- **Named Entity Recognition**: Automatic entity extraction using spaCy NER
+- **Multi-Representation Storage**: Store concepts as 384-dimensional vectors, human-readable markdown, or structured ThoughtForm JSON
+- **Bidirectional Conversion**: Convert between any two representations via the `convert_concept` tool
+- **Semantic Search**: Find similar concepts using sqlite-vec (or pgvector) similarity search
+- **In-Process Embeddings**: Text embedding via `@xenova/transformers` (all-MiniLM-L6-v2) — no external service required
 - **Local-First**: All processing happens locally - no external API calls required
 - **MCP Native**: Full integration with Anthropic's Model Context Protocol
 
@@ -22,18 +22,21 @@ A local AI agent that stores and converts concepts between three representations
 │                    MCP Server (TypeScript)                      │
 │                  @modelcontextprotocol/sdk                      │
 ├─────────────────────────────────────────────────────────────────┤
-│  17 Tools: save/read/convert concepts + utilities               │
+│  Tools: save/read/delete/list/batch/search/convert/embed/stats  │
+│  + agentvault_backup and optional vault_* tools                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  Storage: Drizzle ORM + better-sqlite3 (WAL mode)               │
+│  Embeddings: @xenova/transformers (all-MiniLM-L6-v2, 384-dim)   │
+├─────────────────────────────────────────────────────────────────┤
+│  Storage: better-sqlite3 + sqlite-vec (WAL mode), or Postgres   │
+│  + pgvector via POLYTICIAN_DB_BACKEND=postgres                  │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ HTTP (localhost:8787)
+                             │ HTTP (optional)
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Python Sidecar (FastAPI)                     │
+│           Python Sidecar (Flask, optional helper)               │
 ├─────────────────────────────────────────────────────────────────┤
-│  • sentence-transformers (all-MiniLM-L6-v2) - 768-dim embeddings│
-│  • spaCy (en_core_web_sm) - Named Entity Recognition            │
-│  • FAISS - Vector similarity search                             │
+│  • FAISS index rebuild after bundle restore (/rebuild-index)    │
+│  • PolyVault bundle serialize/deserialize endpoints             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -989,6 +992,16 @@ The `contextGraph` is an adjacency list. You can:
 
 ## API Reference
 
+> **Note:** The tool-by-tool reference below describes an earlier API surface
+> and is pending a rewrite. The tools actually registered by the current
+> server are: `save_concept`, `read_concept`, `delete_concept`,
+> `list_concepts`, `batch_save_concepts`, `search_concepts`,
+> `convert_concept`, `embed_text`, `health_check`, `get_stats`,
+> `agentvault_backup`, and (when AgentVault is configured) `vault_infer`,
+> `vault_memory_push`, `vault_memory_pull`, `vault_archive_concept`,
+> `vault_get_secret`, `vault_memory_repo_log`, `vault_restore`. See
+> `src/server.ts` for authoritative schemas.
+
 ### Save Commands
 
 #### `save_concept_as_vectors`
@@ -1508,8 +1521,14 @@ const commands = { ...allCommands, ...myCommands };
 # Type checking
 npm run typecheck
 
-# TODO: Add test framework
+# Full test suite (vitest)
 npm test
+
+# Watch mode
+npm run test:watch
+
+# Lint + typecheck + formatting
+npm run quality
 ```
 
 ---

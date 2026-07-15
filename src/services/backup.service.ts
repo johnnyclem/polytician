@@ -17,8 +17,18 @@ const SAVE_COUNTER_KEY = 'backup_save_counter';
  */
 export class BackupService {
   private listening = false;
-  private readonly onCreated = (): void => { this.incrementAndCheck(); };
-  private readonly onUpdated = (): void => { this.incrementAndCheck(); };
+  /**
+   * Serializes counter updates: getCounter/setMetadata is a read-modify-write,
+   * so concurrent events must be chained or increments (and threshold
+   * triggers) can be lost.
+   */
+  private queue: Promise<void> = Promise.resolve();
+  private readonly onCreated = (): void => {
+    this.incrementAndCheck();
+  };
+  private readonly onUpdated = (): void => {
+    this.incrementAndCheck();
+  };
 
   start(): void {
     if (this.listening) return;
@@ -51,9 +61,11 @@ export class BackupService {
 
   /** Increment the counter and trigger backup if threshold is reached. */
   private incrementAndCheck(): void {
-    this.incrementAndCheckAsync().catch((err: unknown) => {
-      logger.error('backup-service increment failed', err);
-    });
+    this.queue = this.queue
+      .then(() => this.incrementAndCheckAsync())
+      .catch((err: unknown) => {
+        logger.error('backup-service increment failed', err);
+      });
   }
 
   private async incrementAndCheckAsync(): Promise<void> {

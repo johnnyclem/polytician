@@ -86,7 +86,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     return (
       (this.db
         .prepare(
-          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = ?',
+          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = ?'
         )
         .get(id) as ConceptRow | undefined) ?? null
     );
@@ -96,7 +96,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     this.db
       .prepare(
         `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         row.id,
@@ -107,14 +107,14 @@ export class SqliteAdapter implements DatabaseAdapter {
         row.tags,
         row.markdown,
         row.thoughtform,
-        row.embedding,
+        row.embedding
       );
   }
 
   updateConcept(id: string, fields: Record<string, unknown>): void {
     const keys = Object.keys(fields);
     if (keys.length === 0) return;
-    const setClauses = keys.map((k) => `${k} = ?`).join(', ');
+    const setClauses = keys.map(k => `${k} = ?`).join(', ');
     const values = Object.values(fields);
     this.db.prepare(`UPDATE concepts SET ${setClauses} WHERE id = ?`).run(...values, id);
   }
@@ -123,12 +123,10 @@ export class SqliteAdapter implements DatabaseAdapter {
     this.db.prepare('DELETE FROM concepts WHERE id = ?').run(id);
   }
 
-  listConcepts(params: {
-    limit: number;
-    offset: number;
-    tags?: string[];
-    namespace?: string;
-  }): { rows: ListRow[]; total: number } {
+  listConcepts(params: { limit: number; offset: number; tags?: string[]; namespace?: string }): {
+    rows: ListRow[];
+    total: number;
+  } {
     const conditions: string[] = [];
     const queryParams: unknown[] = [];
 
@@ -152,7 +150,7 @@ export class SqliteAdapter implements DatabaseAdapter {
 
     const rows = this.db
       .prepare(
-        `SELECT id, namespace, version, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+        `SELECT id, namespace, version, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
       )
       .all(...queryParams, params.limit, params.offset) as ListRow[];
 
@@ -173,7 +171,7 @@ export class SqliteAdapter implements DatabaseAdapter {
   vectorSearch(queryEmbedding: Buffer, k: number): VectorResult[] {
     return this.db
       .prepare(
-        'SELECT concept_id, distance FROM concept_vectors WHERE embedding MATCH ? AND k = ? ORDER BY distance',
+        'SELECT concept_id, distance FROM concept_vectors WHERE embedding MATCH ? AND k = ? ORDER BY distance'
       )
       .all(queryEmbedding, k) as VectorResult[];
   }
@@ -184,7 +182,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     return this.db
       .prepare(
         `SELECT id, namespace, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec
-         FROM concepts WHERE id IN (${placeholders})`,
+         FROM concepts WHERE id IN (${placeholders})`
       )
       .all(...ids) as ConceptMetaRow[];
   }
@@ -202,23 +200,28 @@ export class SqliteAdapter implements DatabaseAdapter {
     const vectorSubquery = namespace
       ? 'SELECT COUNT(*) as count FROM concept_vectors WHERE concept_id IN (SELECT id FROM concepts WHERE namespace = ?)'
       : 'SELECT COUNT(*) as count FROM concept_vectors';
-    const vectorCount = (
-      this.db.prepare(vectorSubquery).get(...nsParam) as { count: number }
-    ).count;
+    const vectorCount = (this.db.prepare(vectorSubquery).get(...nsParam) as { count: number })
+      .count;
 
     const mdCount = (
       this.db
-        .prepare(`SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`)
+        .prepare(
+          `SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`
+        )
         .get(...nsParam) as { count: number }
     ).count;
     const tfCount = (
       this.db
-        .prepare(`SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`)
+        .prepare(
+          `SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`
+        )
         .get(...nsParam) as { count: number }
     ).count;
     const vecCount = (
       this.db
-        .prepare(`SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`)
+        .prepare(
+          `SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL${namespace ? ' AND namespace = ?' : ''}`
+        )
         .get(...nsParam) as { count: number }
     ).count;
 
@@ -226,16 +229,16 @@ export class SqliteAdapter implements DatabaseAdapter {
   }
 
   getMetadata(key: string): string | null {
-    const row = this.db
-      .prepare('SELECT value FROM metadata WHERE key = ?')
-      .get(key) as { value: string } | undefined;
+    const row = this.db.prepare('SELECT value FROM metadata WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
     return row?.value ?? null;
   }
 
   setMetadata(key: string, value: string): void {
     this.db
       .prepare(
-        'INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        'INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
       )
       .run(key, value);
   }

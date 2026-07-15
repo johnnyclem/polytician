@@ -32,16 +32,14 @@ export function computeRemoteDelta(
   remoteForms: ThoughtFormV1[],
   localBaseUpdatedAtMs: number,
   observedRemoteMaxUpdatedAtMs: number,
-  skewWindowMs?: number,
+  skewWindowMs?: number
 ): { delta: ThoughtFormV1[]; lowerBound: number } {
   const lowerBound = computeSkewSafeLowerBound(
     localBaseUpdatedAtMs,
     observedRemoteMaxUpdatedAtMs,
-    skewWindowMs,
+    skewWindowMs
   );
-  const delta = remoteForms.filter(
-    (tf) => tf.metadata.updatedAtMs > lowerBound,
-  );
+  const delta = remoteForms.filter(tf => tf.metadata.updatedAtMs > lowerBound);
   return { delta, lowerBound };
 }
 
@@ -52,19 +50,14 @@ export function computeRemoteDelta(
  *  3. Return merged result with updated base marker.
  */
 export function rebase(input: RebaseInput): RebaseResult {
-  const {
-    localForms,
-    remoteForms,
-    localBaseUpdatedAtMs,
-    observedRemoteMaxUpdatedAtMs,
-    options,
-  } = input;
+  const { localForms, remoteForms, localBaseUpdatedAtMs, observedRemoteMaxUpdatedAtMs, options } =
+    input;
 
   const { delta: remoteDelta, lowerBound } = computeRemoteDelta(
     remoteForms,
     localBaseUpdatedAtMs,
     observedRemoteMaxUpdatedAtMs,
-    options.skewWindowMs,
+    options.skewWindowMs
   );
 
   const mergeResult = mergeThoughtformSets(localForms, remoteDelta, options);
@@ -72,7 +65,7 @@ export function rebase(input: RebaseInput): RebaseResult {
   // New base is the max updatedAtMs across all merged forms
   const newBaseUpdatedAtMs = mergeResult.merged.reduce(
     (max, tf) => Math.max(max, tf.metadata.updatedAtMs),
-    0,
+    0
   );
 
   return {

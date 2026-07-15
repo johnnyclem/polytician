@@ -6,10 +6,7 @@ const gunzipAsync = promisify(gunzipCb);
 
 export type CompressionMode = 'none' | 'gzip';
 
-export async function compress(
-  data: Uint8Array,
-  mode: CompressionMode
-): Promise<Uint8Array> {
+export async function compress(data: Uint8Array, mode: CompressionMode): Promise<Uint8Array> {
   if (mode === 'none') {
     return data;
   }
@@ -19,10 +16,7 @@ export async function compress(
   return new Uint8Array(buf);
 }
 
-export async function decompress(
-  data: Uint8Array,
-  mode: CompressionMode
-): Promise<Uint8Array> {
+export async function decompress(data: Uint8Array, mode: CompressionMode): Promise<Uint8Array> {
   if (mode === 'none') {
     return data;
   }

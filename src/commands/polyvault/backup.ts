@@ -143,7 +143,10 @@ export async function runBackup(
 
   // Empty backup: still valid, no-op
   if (filtered.length === 0) {
-    vaultLogger.info('backup.empty', { inputCount: rawInput.length, duration_ms: Date.now() - startMs });
+    vaultLogger.info('backup.empty', {
+      inputCount: rawInput.length,
+      duration_ms: Date.now() - startMs,
+    });
     const emptyResult: BackupResult = {
       status: 'ok',
       bundleId: '',

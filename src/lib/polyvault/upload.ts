@@ -98,13 +98,10 @@ function jitter(delayMs: number): number {
 }
 
 async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  maxAttempts: number,
-): Promise<T> {
+async function retryWithBackoff<T>(fn: () => Promise<T>, maxAttempts: number): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
@@ -112,7 +109,8 @@ async function retryWithBackoff<T>(
     } catch (err) {
       lastError = err;
       if (attempt < maxAttempts - 1) {
-        const baseDelay = DEFAULT_RETRY_DELAYS_MS[Math.min(attempt, DEFAULT_RETRY_DELAYS_MS.length - 1)]!;
+        const baseDelay =
+          DEFAULT_RETRY_DELAYS_MS[Math.min(attempt, DEFAULT_RETRY_DELAYS_MS.length - 1)]!;
         await sleep(jitter(baseDelay));
       }
     }

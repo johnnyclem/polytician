@@ -1,5 +1,23 @@
-import { gzipSync } from 'node:zlib';
+/**
+ * ThoughtForm bundle storage helpers.
+ *
+ * This module covers the full bundle lifecycle:
+ * - {@link serializeBundle}: array of ThoughtForms → JSON (+ optional gzip)
+ * - {@link encryptBundle} / {@link decryptBundle}: placeholder VetKeys-style
+ *   encryption hooks for the AgentVault security module
+ * - {@link deserializeAndUpsertBundle}: JSON / gzip bundle → database upsert
+ *   with last-write-wins conflict handling
+ * - {@link serializeThoughtFormsBundle}: database → versioned bundle envelope
+ */
+
+import { gzipSync, gunzipSync } from 'node:zlib';
+import { z } from 'zod';
+import { getConfig } from '../config.js';
+import { getAdapter } from '../db/client.js';
+import type { ConceptRow } from '../db/adapter.js';
+import { ThoughtFormSchema } from '../types/thoughtform.js';
 import type { ThoughtForm } from '../types/thoughtform.js';
+import { ValidationError } from '../errors/index.js';
 
 export interface SerializedBundle {
   /** Raw JSON string of the ThoughtForm array. */
@@ -18,7 +36,7 @@ export interface SerializedBundle {
  */
 export function serializeBundle(
   thoughtforms: ThoughtForm[],
-  compress: boolean = true,
+  compress: boolean = true
 ): SerializedBundle {
   const json = JSON.stringify(thoughtforms);
   const rawSize = Buffer.byteLength(json, 'utf8');
@@ -29,15 +47,7 @@ export function serializeBundle(
 
   const compressed = gzipSync(Buffer.from(json, 'utf8'));
   return { json, compressed, rawSize, compressedSize: compressed.byteLength };
-/**
- * ThoughtForm serialization helpers with optional encryption support.
- *
- * The {@link encryptBundle} stub is a placeholder for future VetKeys-style
- * encryption via the AgentVault security module.  When `encrypt` is false
- * (the default) the buffer passes through untouched.
- */
-
-import { getConfig } from '../config.js';
+}
 
 /**
  * Encrypt a serialized ThoughtForm bundle.
@@ -71,13 +81,7 @@ export async function decryptBundle(buffer: Buffer): Promise<Buffer> {
 
   // TODO: integrate with AgentVault security module (VetKeys)
   return buffer;
-import { gunzipSync } from 'node:zlib';
-import { z } from 'zod';
-import { ThoughtFormSchema } from '../types/thoughtform.js';
-import { getAdapter } from '../db/client.js';
-import type { ConceptRow } from '../db/adapter.js';
-import type { ThoughtForm } from '../types/thoughtform.js';
-import { ValidationError } from '../errors/index.js';
+}
 
 /**
  * Zod schema for a ThoughtForm bundle — an array of fully-formed ThoughtForms.
@@ -120,9 +124,7 @@ function maybeDecompress(input: string | Buffer): string {
  * - No duplicate ids after completion.
  * - Older versions never overwrite newer ones.
  */
-export async function deserializeAndUpsertBundle(
-  json: string | Buffer,
-): Promise<void> {
+export async function deserializeAndUpsertBundle(json: string | Buffer): Promise<void> {
   // Step 1: Decompress if needed
   const raw = maybeDecompress(json);
 
@@ -134,12 +136,21 @@ export async function deserializeAndUpsertBundle(
     throw new ValidationError('Bundle is not valid JSON');
   }
 
+  // Accept both a bare ThoughtForm array and the versioned envelope produced
+  // by serializeThoughtFormsBundle, so serialize → deserialize round-trips.
+  if (
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    Array.isArray((parsed as { thoughtforms?: unknown }).thoughtforms)
+  ) {
+    parsed = (parsed as { thoughtforms: unknown }).thoughtforms;
+  }
+
   // Step 3: Validate with zod
   const result = ThoughtFormBundleSchema.safeParse(parsed);
   if (!result.success) {
-    const issues = result.error.issues
-      .map(i => `${i.path.join('.')}: ${i.message}`)
-      .join('; ');
+    const issues = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new ValidationError(`Bundle validation failed: ${issues}`);
   }
 

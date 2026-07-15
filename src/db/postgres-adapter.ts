@@ -67,21 +67,29 @@ export class PostgresAdapter implements DatabaseAdapter {
       )
     `);
 
-    await this.pool.query(`
+    await this.pool
+      .query(
+        `
       CREATE INDEX IF NOT EXISTS idx_concept_vectors_embedding
       ON concept_vectors USING ivfflat (embedding vector_l2_ops)
       WITH (lists = 100)
-    `).catch(async () => {
-      // IVFFlat index requires rows to exist; fall back to no index initially.
-      // For small datasets this is fine — the index can be created later.
-      // Try HNSW instead which doesn't have the minimum rows requirement.
-      await this.pool.query(`
+    `
+      )
+      .catch(async () => {
+        // IVFFlat index requires rows to exist; fall back to no index initially.
+        // For small datasets this is fine — the index can be created later.
+        // Try HNSW instead which doesn't have the minimum rows requirement.
+        await this.pool
+          .query(
+            `
         CREATE INDEX IF NOT EXISTS idx_concept_vectors_embedding
         ON concept_vectors USING hnsw (embedding vector_l2_ops)
-      `).catch(() => {
-        // If HNSW also fails (older pgvector), queries still work via sequential scan.
+      `
+          )
+          .catch(() => {
+            // If HNSW also fails (older pgvector), queries still work via sequential scan.
+          });
       });
-    });
   }
 
   async close(): Promise<void> {
@@ -91,7 +99,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   async findConcept(id: string): Promise<ConceptRow | null> {
     const result = await this.pool.query(
       'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = $1',
-      [id],
+      [id]
     );
     if (result.rows.length === 0) return null;
     return this.toConceptRow(result.rows[0]);
@@ -111,7 +119,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         row.markdown,
         row.thoughtform,
         row.embedding,
-      ],
+      ]
     );
   }
 
@@ -120,10 +128,10 @@ export class PostgresAdapter implements DatabaseAdapter {
     if (keys.length === 0) return;
     const setClauses = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
     const values = Object.values(fields);
-    await this.pool.query(
-      `UPDATE concepts SET ${setClauses} WHERE id = $${keys.length + 1}`,
-      [...values, id],
-    );
+    await this.pool.query(`UPDATE concepts SET ${setClauses} WHERE id = $${keys.length + 1}`, [
+      ...values,
+      id,
+    ]);
   }
 
   async deleteConcept(id: string): Promise<void> {
@@ -157,7 +165,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     const countResult = await this.pool.query(
       `SELECT COUNT(*) as count FROM concepts ${where}`,
-      queryParams,
+      queryParams
     );
 
     const listParams = [...queryParams, params.limit, params.offset];
@@ -169,11 +177,11 @@ export class PostgresAdapter implements DatabaseAdapter {
        FROM concepts ${where}
        ORDER BY updated_at DESC
        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-      listParams,
+      listParams
     );
 
     return {
-      rows: rows.rows.map((r) => ({
+      rows: rows.rows.map(r => ({
         id: r.id as string,
         namespace: (r.namespace as string) ?? 'default',
         version: Number(r.version ?? 1),
@@ -192,14 +200,14 @@ export class PostgresAdapter implements DatabaseAdapter {
     const floats = new Float32Array(
       embedding.buffer,
       embedding.byteOffset,
-      embedding.byteLength / 4,
+      embedding.byteLength / 4
     );
     const pgVector = `[${Array.from(floats).join(',')}]`;
 
     await this.pool.query(
       `INSERT INTO concept_vectors (concept_id, embedding) VALUES ($1, $2)
        ON CONFLICT (concept_id) DO UPDATE SET embedding = $2`,
-      [id, pgVector],
+      [id, pgVector]
     );
   }
 
@@ -211,7 +219,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     const floats = new Float32Array(
       queryEmbedding.buffer,
       queryEmbedding.byteOffset,
-      queryEmbedding.byteLength / 4,
+      queryEmbedding.byteLength / 4
     );
     const pgVector = `[${Array.from(floats).join(',')}]`;
 
@@ -220,10 +228,10 @@ export class PostgresAdapter implements DatabaseAdapter {
        FROM concept_vectors
        ORDER BY embedding <-> $1::vector
        LIMIT $2`,
-      [pgVector, k],
+      [pgVector, k]
     );
 
-    return result.rows.map((r) => ({
+    return result.rows.map(r => ({
       concept_id: r.concept_id as string,
       distance: Number(r.distance),
     }));
@@ -238,10 +246,10 @@ export class PostgresAdapter implements DatabaseAdapter {
               CASE WHEN thoughtform IS NOT NULL THEN 1 ELSE 0 END as has_tf,
               CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_vec
        FROM concepts WHERE id IN (${placeholders})`,
-      ids,
+      ids
     );
 
-    return result.rows.map((r) => ({
+    return result.rows.map(r => ({
       id: r.id as string,
       namespace: (r.namespace as string) ?? 'default',
       tags: r.tags as string,
@@ -260,20 +268,20 @@ export class PostgresAdapter implements DatabaseAdapter {
       namespace
         ? this.pool.query(
             'SELECT COUNT(*) as count FROM concept_vectors WHERE concept_id IN (SELECT id FROM concepts WHERE namespace = $1)',
-            nsParam,
+            nsParam
           )
         : this.pool.query('SELECT COUNT(*) as count FROM concept_vectors'),
       this.pool.query(
         `SELECT COUNT(*) as count FROM concepts WHERE markdown IS NOT NULL${namespace ? ' AND namespace = $1' : ''}`,
-        nsParam,
+        nsParam
       ),
       this.pool.query(
         `SELECT COUNT(*) as count FROM concepts WHERE thoughtform IS NOT NULL${namespace ? ' AND namespace = $1' : ''}`,
-        nsParam,
+        nsParam
       ),
       this.pool.query(
         `SELECT COUNT(*) as count FROM concepts WHERE embedding IS NOT NULL${namespace ? ' AND namespace = $1' : ''}`,
-        nsParam,
+        nsParam
       ),
     ]);
 
@@ -287,10 +295,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   }
 
   async getMetadata(key: string): Promise<string | null> {
-    const result = await this.pool.query(
-      'SELECT value FROM metadata WHERE key = $1',
-      [key],
-    );
+    const result = await this.pool.query('SELECT value FROM metadata WHERE key = $1', [key]);
     if (result.rows.length === 0) return null;
     return result.rows[0].value as string;
   }
@@ -298,7 +303,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   async setMetadata(key: string, value: string): Promise<void> {
     await this.pool.query(
       'INSERT INTO metadata (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
-      [key, value],
+      [key, value]
     );
   }
 

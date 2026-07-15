@@ -54,17 +54,20 @@ const DEFAULT_DATA_DIR = join(homedir(), '.polytician');
 
 let cachedConfig: PolyticianConfig | null = null;
 
-function loadConfigFile(): Partial<PolyticianConfig> & { llm?: Partial<LLMConfig>; nlp?: Partial<NLPConfig> } {
-  const paths = [
-    join(process.cwd(), '.polytician.json'),
-    join(homedir(), '.polytician.json'),
-  ];
+function loadConfigFile(): Partial<PolyticianConfig> & {
+  llm?: Partial<LLMConfig>;
+  nlp?: Partial<NLPConfig>;
+} {
+  const paths = [join(process.cwd(), '.polytician.json'), join(homedir(), '.polytician.json')];
 
   for (const path of paths) {
     if (existsSync(path)) {
       try {
         const raw = readFileSync(path, 'utf-8');
-        return JSON.parse(raw) as Partial<PolyticianConfig> & { llm?: Partial<LLMConfig>; nlp?: Partial<NLPConfig> };
+        return JSON.parse(raw) as Partial<PolyticianConfig> & {
+          llm?: Partial<LLMConfig>;
+          nlp?: Partial<NLPConfig>;
+        };
       } catch {
         // Ignore parse errors, use defaults
       }
@@ -85,20 +88,23 @@ export function getConfig(): PolyticianConfig {
   const fileConfig = loadConfigFile();
   const dataDir = process.env['POLYTICIAN_DATA_DIR'] ?? fileConfig.dataDir ?? DEFAULT_DATA_DIR;
 
-  const healthPortRaw = process.env['POLYTICIAN_HEALTH_PORT'] ?? String(fileConfig.healthPort ?? '8787');
-  const sidecarUrl = process.env['POLYTICIAN_SIDECAR_URL'] ?? (fileConfig.sidecarUrl as string | undefined) ?? null;
+  const healthPortRaw =
+    process.env['POLYTICIAN_HEALTH_PORT'] ?? String(fileConfig.healthPort ?? '8787');
+  const sidecarUrl =
+    process.env['POLYTICIAN_SIDECAR_URL'] ?? (fileConfig.sidecarUrl as string | undefined) ?? null;
   const distFile = (fileConfig as { distributed?: Partial<DistributedConfig> }).distributed ?? {};
 
   // AgentVault integration config (optional, sync Zod parse)
   const rawAv = (fileConfig as Record<string, unknown>).agentVault;
   const avApiBase = process.env['POLYTICIAN_AV_API_URL'];
-  const avApiToken = resolveEnvVar(process.env['POLYTICIAN_AV_API_TOKEN']) ??
+  const avApiToken =
+    resolveEnvVar(process.env['POLYTICIAN_AV_API_TOKEN']) ??
     resolveEnvVar((rawAv as Record<string, string> | undefined)?.apiToken);
   let agentVaultConfig: AgentVaultConfig | undefined;
   if (rawAv || avApiBase) {
     try {
       const merged = {
-        ...(rawAv as Record<string, unknown> ?? {}),
+        ...((rawAv as Record<string, unknown>) ?? {}),
         ...(avApiBase ? { apiBaseUrl: avApiBase } : {}),
         ...(avApiToken ? { apiToken: avApiToken } : {}),
       };
@@ -108,26 +114,40 @@ export function getConfig(): PolyticianConfig {
     }
   }
 
-  const encryptFlag = process.argv.includes('--encrypt') ||
+  const encryptFlag =
+    process.argv.includes('--encrypt') ||
     parseBool(process.env['POLYTICIAN_ENCRYPT']) ||
     (fileConfig as Record<string, unknown>).encrypt === true;
 
   cachedConfig = {
     dataDir,
     dbPath: join(dataDir, 'concepts.db'),
-    dbBackend: (process.env['POLYTICIAN_DB_BACKEND'] as DbBackend) ??
-      (fileConfig as Record<string, unknown>).dbBackend ?? 'sqlite',
-    postgresUrl: process.env['POLYTICIAN_POSTGRES_URL'] ??
-      (fileConfig as Record<string, unknown>).postgresUrl as string ?? '',
+    dbBackend:
+      (process.env['POLYTICIAN_DB_BACKEND'] as DbBackend) ??
+      (fileConfig as Record<string, unknown>).dbBackend ??
+      'sqlite',
+    postgresUrl:
+      process.env['POLYTICIAN_POSTGRES_URL'] ??
+      ((fileConfig as Record<string, unknown>).postgresUrl as string) ??
+      '',
     modelsDir: join(dataDir, 'models'),
-    embeddingModel: process.env['POLYTICIAN_EMBEDDING_MODEL'] ?? fileConfig.embeddingModel ?? 'Xenova/all-MiniLM-L6-v2',
+    embeddingModel:
+      process.env['POLYTICIAN_EMBEDDING_MODEL'] ??
+      fileConfig.embeddingModel ??
+      'Xenova/all-MiniLM-L6-v2',
     llm: {
-      provider: (process.env['POLYTICIAN_LLM_PROVIDER'] as LLMConfig['provider']) ?? fileConfig.llm?.provider ?? 'none',
+      provider:
+        (process.env['POLYTICIAN_LLM_PROVIDER'] as LLMConfig['provider']) ??
+        fileConfig.llm?.provider ??
+        'none',
       model: process.env['POLYTICIAN_LLM_MODEL'] ?? fileConfig.llm?.model,
       apiKey: resolveEnvVar(process.env['POLYTICIAN_LLM_API_KEY'] ?? fileConfig.llm?.apiKey),
     },
     nlp: {
-      pipeline: (process.env['POLYTICIAN_NLP_PIPELINE'] as NLPConfig['pipeline']) ?? fileConfig.nlp?.pipeline ?? 'none',
+      pipeline:
+        (process.env['POLYTICIAN_NLP_PIPELINE'] as NLPConfig['pipeline']) ??
+        fileConfig.nlp?.pipeline ??
+        'none',
       entityTypes: fileConfig.nlp?.entityTypes,
       minConfidence: fileConfig.nlp?.minConfidence,
     },
@@ -135,18 +155,21 @@ export function getConfig(): PolyticianConfig {
     sidecarUrl,
     distributed: {
       nodeId: process.env['POLYTICIAN_NODE_ID'] ?? distFile.nodeId ?? generateNodeId(),
-      externalStateUrl: process.env['POLYTICIAN_EXTERNAL_STATE_URL'] ?? distFile.externalStateUrl ?? null,
+      externalStateUrl:
+        process.env['POLYTICIAN_EXTERNAL_STATE_URL'] ?? distFile.externalStateUrl ?? null,
       vectorIndexUrl: process.env['POLYTICIAN_VECTOR_INDEX_URL'] ?? distFile.vectorIndexUrl ?? null,
-      asyncIndexSync: parseBool(process.env['POLYTICIAN_ASYNC_INDEX_SYNC']) ?? distFile.asyncIndexSync ?? false,
+      asyncIndexSync:
+        parseBool(process.env['POLYTICIAN_ASYNC_INDEX_SYNC']) ?? distFile.asyncIndexSync ?? false,
     },
     agentVault: agentVaultConfig,
     encrypt: !!encryptFlag,
     backup: {
-      threshold: parseInt(
-        process.env['POLYTICIAN_BACKUP_THRESHOLD'] ??
-        String((fileConfig as Record<string, unknown>).backupThreshold ?? '50'),
-        10,
-      ) || 50,
+      threshold:
+        parseInt(
+          process.env['POLYTICIAN_BACKUP_THRESHOLD'] ??
+            String((fileConfig as Record<string, unknown>).backupThreshold ?? '50'),
+          10
+        ) || 50,
     },
   };
 

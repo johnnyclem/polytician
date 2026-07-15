@@ -17,12 +17,12 @@ const MAX_SAFE_TS = Number.MAX_SAFE_INTEGER;
 export class TimestampOverflowError extends Error {
   constructor(
     public readonly value: bigint | number,
-    public readonly direction: 'ts-to-motoko' | 'motoko-to-ts',
+    public readonly direction: 'ts-to-motoko' | 'motoko-to-ts'
   ) {
     super(
       direction === 'ts-to-motoko'
         ? `ERR_TS_OVERFLOW: timestamp ${value} cannot be safely converted to Nat64 (negative or > MAX_SAFE_INTEGER)`
-        : `ERR_TS_OVERFLOW: Nat64 value ${value} exceeds Number.MAX_SAFE_INTEGER and cannot be safely represented in TypeScript`,
+        : `ERR_TS_OVERFLOW: Nat64 value ${value} exceeds Number.MAX_SAFE_INTEGER and cannot be safely represented in TypeScript`
     );
     this.name = 'TimestampOverflowError';
   }
@@ -67,7 +67,7 @@ export function validateEpochMs(value: unknown): value is number {
  * Validate a Python-side timestamp integer for interoperability.
  * Python int range for safe interop: 0 <= ts <= 2^63-1.
  */
-const PYTHON_MAX_TS = (2n ** 63n) - 1n;
+const PYTHON_MAX_TS = 2n ** 63n - 1n;
 
 export function validatePythonTimestamp(value: number): boolean {
   if (!Number.isInteger(value) || value < 0) return false;

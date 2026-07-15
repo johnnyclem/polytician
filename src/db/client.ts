@@ -17,7 +17,7 @@ export function initializeDatabase(overrideDbPath?: string): DatabaseAdapter {
 
   if (config.dbBackend === 'postgres') {
     throw new Error(
-      'PostgreSQL backend requires async initialization. Use initializeDatabaseAsync() instead.',
+      'PostgreSQL backend requires async initialization. Use initializeDatabaseAsync() instead.'
     );
   }
 
@@ -31,9 +31,7 @@ export function initializeDatabase(overrideDbPath?: string): DatabaseAdapter {
 /**
  * Async initialization — required for PostgreSQL, also works for SQLite.
  */
-export async function initializeDatabaseAsync(
-  overrideDbPath?: string,
-): Promise<DatabaseAdapter> {
+export async function initializeDatabaseAsync(overrideDbPath?: string): Promise<DatabaseAdapter> {
   if (adapter) return adapter;
 
   const config = getConfig();

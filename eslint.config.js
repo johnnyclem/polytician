@@ -15,24 +15,15 @@ export default [
       parserOptions: {
         project: './tsconfig.json',
       },
-      globals: {
-        console: 'readonly',
-        process: 'readonly',
-        Buffer: 'readonly',
-        __dirname: 'readonly',
-        __filename: 'readonly',
-        global: 'readonly',
-        setTimeout: 'readonly',
-        clearTimeout: 'readonly',
-        fetch: 'readonly',
-        AbortSignal: 'readonly',
-      },
     },
     plugins: {
       '@typescript-eslint': tseslint,
     },
     rules: {
       ...tseslint.configs.recommended.rules,
+      // TypeScript itself reports undefined identifiers; the no-undef rule
+      // only produces false positives on TS sources (lib/DOM/Node globals).
+      'no-undef': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       '@typescript-eslint/explicit-function-return-type': 'warn',
       '@typescript-eslint/no-explicit-any': 'warn',

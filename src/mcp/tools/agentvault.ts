@@ -35,7 +35,7 @@ export interface BackupBundle {
  */
 async function serializeBackupBundle(
   namespace: string | undefined,
-  lastSynced: number,
+  lastSynced: number
 ): Promise<{ bundle: BackupBundle; json: string; sizeBytes: number; sha256: string }> {
   const PAGE_SIZE = 100;
   const allConcepts: BackupBundle['concepts'] = [];
@@ -121,7 +121,7 @@ export function registerBackupTool(server: McpServer): void {
                   createdAt: bundle.createdAt,
                 },
                 null,
-                2,
+                2
               ),
             },
           ],
@@ -138,6 +138,6 @@ export function registerBackupTool(server: McpServer): void {
           ],
         };
       }
-    },
+    }
   );
 }
