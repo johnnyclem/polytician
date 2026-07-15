@@ -45,15 +45,14 @@ const DEFAULT_SKEW_WINDOW_MS = 300_000; // 5 minutes
 export function resolveConflict(
   local: ThoughtFormV1,
   remote: ThoughtFormV1,
-  options: ConflictResolutionOptions,
+  options: ConflictResolutionOptions
 ): ConflictRecord {
   const { policy, prefer, skewWindowMs = DEFAULT_SKEW_WINDOW_MS } = options;
 
   // Fast path: identical content → no real conflict
   if (local.metadata.contentHash === remote.metadata.contentHash) {
     // Pick the one with higher updatedAtMs for consistency
-    const winner =
-      local.metadata.updatedAtMs >= remote.metadata.updatedAtMs ? local : remote;
+    const winner = local.metadata.updatedAtMs >= remote.metadata.updatedAtMs ? local : remote;
     return {
       id: local.id,
       outcome: 'no-conflict',
@@ -121,9 +120,7 @@ export function resolveConflict(
   }
 
   // Step 2: tie → lexical compare contentHash (higher hex wins)
-  const hashCmp = local.metadata.contentHash.localeCompare(
-    remote.metadata.contentHash,
-  );
+  const hashCmp = local.metadata.contentHash.localeCompare(remote.metadata.contentHash);
   if (hashCmp !== 0) {
     const localWins = hashCmp > 0;
     return {
@@ -136,9 +133,7 @@ export function resolveConflict(
   }
 
   // Step 3: tie → lexical compare source, then id
-  const sourceCmp = (local.metadata.source ?? '').localeCompare(
-    remote.metadata.source ?? '',
-  );
+  const sourceCmp = (local.metadata.source ?? '').localeCompare(remote.metadata.source ?? '');
   if (sourceCmp !== 0) {
     const localWins = sourceCmp > 0;
     return {
@@ -172,7 +167,7 @@ export function resolveConflict(
 export function mergeThoughtformSets(
   localForms: ThoughtFormV1[],
   remoteForms: ThoughtFormV1[],
-  options: ConflictResolutionOptions,
+  options: ConflictResolutionOptions
 ): MergeResult {
   const localMap = new Map<string, ThoughtFormV1>();
   for (const tf of localForms) {
@@ -227,7 +222,7 @@ export function mergeThoughtformSets(
 export function computeSkewSafeLowerBound(
   lastSyncedAtMs: number,
   observedRemoteMaxUpdatedAtMs: number,
-  skewWindowMs: number = DEFAULT_SKEW_WINDOW_MS,
+  skewWindowMs: number = DEFAULT_SKEW_WINDOW_MS
 ): number {
   const effectiveBase = Math.min(lastSyncedAtMs, observedRemoteMaxUpdatedAtMs);
   return Math.max(0, effectiveBase - skewWindowMs);

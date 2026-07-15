@@ -12,7 +12,7 @@ async function loadModel(): Promise<void> {
     return;
   }
 
-  loading = (async () => {
+  loading = (async (): Promise<void> => {
     const { pipeline, env } = await import('@xenova/transformers');
     const config = getConfig();
     env.cacheDir = config.modelsDir;
@@ -58,9 +58,7 @@ export class EmbeddingService {
 
     for (let i = 0; i < texts.length; i += batchSize) {
       const batch = texts.slice(i, i + batchSize);
-      const batchResults = await Promise.all(
-        batch.map(text => this.embed(text))
-      );
+      const batchResults = await Promise.all(batch.map(text => this.embed(text)));
       results.push(...batchResults);
     }
 

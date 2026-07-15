@@ -80,13 +80,15 @@ export function classifyFailure(exitCode: number, message: string): FailureInfo 
       return {
         code: 'ERR_VALIDATION',
         message,
-        remediation: 'Check input file format and ThoughtForm schema compliance. Run with --dry-run to preview.',
+        remediation:
+          'Check input file format and ThoughtForm schema compliance. Run with --dry-run to preview.',
       };
     case 3:
       return {
         code: 'ERR_AUTH',
         message,
-        remediation: 'Verify principal identity and canister allowlist. Re-authenticate with dfx identity.',
+        remediation:
+          'Verify principal identity and canister allowlist. Re-authenticate with dfx identity.',
       };
     case 4:
       return {
@@ -98,7 +100,8 @@ export function classifyFailure(exitCode: number, message: string): FailureInfo 
       return {
         code: 'ERR_INTEGRITY',
         message,
-        remediation: 'Data integrity check failed. Verify chunk hashes and encryption keys. Consider a full restore.',
+        remediation:
+          'Data integrity check failed. Verify chunk hashes and encryption keys. Consider a full restore.',
       };
     default:
       return {

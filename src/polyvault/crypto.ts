@@ -10,11 +10,7 @@ export interface EncryptResult {
 export interface CryptoAdapter {
   readonly mode: EncryptionMode;
   encrypt(plaintext: Uint8Array, key: Uint8Array): Promise<EncryptResult>;
-  decrypt(
-    ciphertext: Uint8Array,
-    key: Uint8Array,
-    nonce: Uint8Array
-  ): Promise<Uint8Array>;
+  decrypt(ciphertext: Uint8Array, key: Uint8Array, nonce: Uint8Array): Promise<Uint8Array>;
 }
 
 export class EncryptionRequiredError extends Error {
@@ -66,11 +62,7 @@ export class AesGcmCryptoAdapter implements CryptoAdapter {
     return { ciphertext, nonce: new Uint8Array(nonce) };
   }
 
-  async decrypt(
-    ciphertext: Uint8Array,
-    key: Uint8Array,
-    nonce: Uint8Array
-  ): Promise<Uint8Array> {
+  async decrypt(ciphertext: Uint8Array, key: Uint8Array, nonce: Uint8Array): Promise<Uint8Array> {
     validateKeyLength(key);
     if (nonce.length !== AES_GCM_NONCE_BYTES) {
       throw new DecryptionError(
@@ -86,10 +78,7 @@ export class AesGcmCryptoAdapter implements CryptoAdapter {
     try {
       const decipher = createDecipheriv('aes-256-gcm', key, nonce);
       decipher.setAuthTag(tag);
-      const decrypted = Buffer.concat([
-        decipher.update(encData),
-        decipher.final(),
-      ]);
+      const decrypted = Buffer.concat([decipher.update(encData), decipher.final()]);
       return new Uint8Array(decrypted);
     } catch {
       throw new DecryptionError('Decryption failed: authentication tag mismatch');

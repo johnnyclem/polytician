@@ -41,7 +41,7 @@ export function extractEmbeddingText(tf: ThoughtFormV1): string {
  */
 export async function upsertThoughtforms(
   adapter: DatabaseAdapter,
-  thoughtforms: ThoughtFormV1[],
+  thoughtforms: ThoughtFormV1[]
 ): Promise<UpsertResult> {
   let inserted = 0;
   let updated = 0;
@@ -99,6 +99,6 @@ export async function upsertThoughtforms(
  */
 function extractTags(tf: ThoughtFormV1, existingTagsJson: string): string[] {
   const existing: string[] = JSON.parse(existingTagsJson) as string[];
-  const entityTypes = tf.entities.map((e) => e.type);
+  const entityTypes = tf.entities.map(e => e.type);
   return [...new Set([...existing, ...entityTypes])];
 }

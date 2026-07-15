@@ -71,9 +71,7 @@ export class AgentVaultLLMProvider implements LLMProvider {
       'Preserve key facts and relationships.',
     ].join('\n');
 
-    const prompt = options?.conceptId
-      ? `Concept ID: ${options.conceptId}\n\n${context}`
-      : context;
+    const prompt = options?.conceptId ? `Concept ID: ${options.conceptId}\n\n${context}` : context;
 
     const res = await this.client.infer({
       prompt,

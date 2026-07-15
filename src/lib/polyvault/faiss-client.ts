@@ -15,16 +15,13 @@ export interface FaissRebuildResult {
 }
 
 export interface FaissRebuildClient {
-  rebuildIndex(
-    thoughtforms: ThoughtFormV1[],
-    mode: FaissRebuildMode,
-  ): Promise<FaissRebuildResult>;
+  rebuildIndex(thoughtforms: ThoughtFormV1[], mode: FaissRebuildMode): Promise<FaissRebuildResult>;
 }
 
 export class FaissRebuildError extends Error {
   constructor(
     public readonly statusCode: number,
-    public readonly reason: string,
+    public readonly reason: string
   ) {
     super(`FAISS rebuild failed (${statusCode}): ${reason}`);
     this.name = 'FaissRebuildError';
@@ -38,7 +35,7 @@ export function createFaissRebuildClient(sidecarUrl: string): FaissRebuildClient
   return {
     async rebuildIndex(
       thoughtforms: ThoughtFormV1[],
-      mode: FaissRebuildMode,
+      mode: FaissRebuildMode
     ): Promise<FaissRebuildResult> {
       const url = `${sidecarUrl.replace(/\/+$/, '')}/polyvault/faiss/rebuild`;
 

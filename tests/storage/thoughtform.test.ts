@@ -244,6 +244,23 @@ describe('deserializeAndUpsertBundle', () => {
     );
   });
 
+  it('should accept the versioned envelope produced by serializeThoughtFormsBundle', async () => {
+    const tf = makeThoughtForm({ id: '77777777-7777-4777-a777-777777777777' });
+    const envelope = JSON.stringify({
+      version: '1.0',
+      thoughtforms: [tf],
+      metadata: { lastSynced: Date.now(), count: 1 },
+    });
+
+    await deserializeAndUpsertBundle(envelope);
+
+    const adapter = getAdapter();
+    const row = await adapter.findConcept(tf.id);
+    expect(row).not.toBeNull();
+    const stored = JSON.parse(row!.thoughtform!);
+    expect(stored.rawText).toBe(tf.rawText);
+  });
+
   it('should preserve metadata tags on insert', async () => {
     const tf = makeThoughtForm({
       id: '99999999-9999-4999-a999-999999999999',

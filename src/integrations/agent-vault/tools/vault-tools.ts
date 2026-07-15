@@ -54,9 +54,10 @@ function deserializeBundle(raw: unknown): VaultBundle {
       id: c.id,
       namespace: typeof c.namespace === 'string' ? c.namespace : undefined,
       markdown: typeof c.markdown === 'string' ? c.markdown : null,
-      thoughtform: c.thoughtform && typeof c.thoughtform === 'object'
-        ? (c.thoughtform as Record<string, unknown>)
-        : null,
+      thoughtform:
+        c.thoughtform && typeof c.thoughtform === 'object'
+          ? (c.thoughtform as Record<string, unknown>)
+          : null,
       embedding: Array.isArray(c.embedding) ? (c.embedding as number[]) : null,
       tags: Array.isArray(c.tags)
         ? (c.tags as unknown[]).filter((t): t is string => typeof t === 'string')
@@ -66,7 +67,8 @@ function deserializeBundle(raw: unknown): VaultBundle {
 
   return {
     version: typeof bundle.version === 'number' ? bundle.version : 1,
-    exportedAt: typeof bundle.exportedAt === 'string' ? bundle.exportedAt : new Date().toISOString(),
+    exportedAt:
+      typeof bundle.exportedAt === 'string' ? bundle.exportedAt : new Date().toISOString(),
     concepts,
   };
 }
@@ -100,21 +102,25 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
 
   server.tool(
     'vault_infer',
-    'Run a prompt through AgentVault\'s inference fallback chain (Bittensor -> Venice AI -> local) and optionally save the result as a concept.',
+    "Run a prompt through AgentVault's inference fallback chain (Bittensor -> Venice AI -> local) and optionally save the result as a concept.",
     {
       prompt: z.string().min(1).describe('Prompt text to send to the inference chain'),
       systemPrompt: z.string().optional().describe('Optional system prompt'),
       maxTokens: z.number().int().positive().optional(),
       temperature: z.number().min(0).max(2).optional(),
-      saveAsConceptNamespace: z.string().optional().describe(
-        'If set, save the inference result as a markdown concept in this namespace'
-      ),
+      saveAsConceptNamespace: z
+        .string()
+        .optional()
+        .describe('If set, save the inference result as a markdown concept in this namespace'),
       tags: z.array(z.string()).optional(),
     },
     async ({ prompt, systemPrompt, maxTokens, temperature, saveAsConceptNamespace, tags }) => {
       try {
         const res = await inferClient.infer({
-          prompt, systemPrompt, maxTokens, temperature,
+          prompt,
+          systemPrompt,
+          maxTokens,
+          temperature,
           preferredBackend: config.inference.preferredBackend,
         });
 
@@ -131,10 +137,17 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
         }
 
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ text: res.text, backend: res.backend, latencyMs: res.latencyMs, savedConceptId }),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                text: res.text,
+                backend: res.backend,
+                latencyMs: res.latencyMs,
+                savedConceptId,
+              }),
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -149,7 +162,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
 
   server.tool(
     'vault_memory_push',
-    'Push a Polytician concept to AgentVault\'s memory_repo canister immediately.',
+    "Push a Polytician concept to AgentVault's memory_repo canister immediately.",
     {
       conceptId: z.string().uuid().describe('Concept UUID to push'),
     },
@@ -177,7 +190,9 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
         }
         const commit = await memClient.commit(`polytician: manual push ${conceptId}`, entries);
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ pushed: true, sha: commit.sha }) }],
+          content: [
+            { type: 'text' as const, text: JSON.stringify({ pushed: true, sha: commit.sha }) },
+          ],
         };
       } catch (err) {
         return {
@@ -192,7 +207,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
 
   server.tool(
     'vault_memory_pull',
-    'Pull all entries from AgentVault\'s memory_repo branch into Polytician concepts.',
+    "Pull all entries from AgentVault's memory_repo branch into Polytician concepts.",
     {},
     async () => {
       try {
@@ -208,10 +223,17 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           imported++;
         }
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ pulled: true, branch: branch.branch, headSha: branch.headSha, imported }),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                pulled: true,
+                branch: branch.branch,
+                headSha: branch.headSha,
+                imported,
+              }),
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -237,7 +259,12 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
         if (!content) {
           return {
             isError: true,
-            content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Concept has no archivable content' }) }],
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ error: 'Concept has no archivable content' }),
+              },
+            ],
           };
         }
         const receipt = await arweaveClient.upload({
@@ -252,10 +279,17 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           },
         });
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ archived: true, txId: receipt.txId, url: receipt.url, size: receipt.size }),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                archived: true,
+                txId: receipt.txId,
+                url: receipt.url,
+                size: receipt.size,
+              }),
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -270,7 +304,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
 
   server.tool(
     'vault_get_secret',
-    'Retrieve a named secret from AgentVault\'s secret provider. Returns metadata only, never the raw value.',
+    "Retrieve a named secret from AgentVault's secret provider. Returns metadata only, never the raw value.",
     {
       name: z.string().min(1).describe('Secret name in AgentVault'),
     },
@@ -278,15 +312,17 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
       try {
         const secret = await secretClient.getSecret(name);
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              name: secret.name,
-              provider: secret.provider,
-              rotatedAt: secret.rotatedAt,
-              valueLength: secret.value.length,
-            }),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                name: secret.name,
+                provider: secret.provider,
+                rotatedAt: secret.rotatedAt,
+                valueLength: secret.value.length,
+              }),
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -307,17 +343,19 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
       try {
         const branch = await memClient.getBranchState();
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              branch: branch.branch,
-              headSha: branch.headSha,
-              entryCount: branch.entries.length,
-              conceptKeys: branch.entries
-                .filter(e => e.key.startsWith('concepts/'))
-                .map(e => e.key),
-            }),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                branch: branch.branch,
+                headSha: branch.headSha,
+                entryCount: branch.entries.length,
+                conceptKeys: branch.entries
+                  .filter(e => e.key.startsWith('concepts/'))
+                  .map(e => e.key),
+              }),
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -334,32 +372,42 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
     'vault_restore',
     'Restore concepts and vector index from a vault bundle. Accepts either inline bundle JSON or a file path to a bundle. Deserializes all concepts, saves them, and rebuilds the FAISS vector index.',
     {
-      bundle: z.any().optional().describe(
-        'Inline bundle JSON object containing { version, exportedAt, concepts: [...] }'
-      ),
-      path: z.string().optional().describe(
-        'File path to a JSON bundle file. Mutually exclusive with "bundle".'
-      ),
+      bundle: z
+        .any()
+        .optional()
+        .describe('Inline bundle JSON object containing { version, exportedAt, concepts: [...] }'),
+      path: z
+        .string()
+        .optional()
+        .describe('File path to a JSON bundle file. Mutually exclusive with "bundle".'),
     },
     async ({ bundle, path }) => {
       try {
         if (!bundle && !path) {
           return {
             isError: true,
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ error: 'Provide either "bundle" (inline JSON) or "path" (file path)' }),
-            }],
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: 'Provide either "bundle" (inline JSON) or "path" (file path)',
+                }),
+              },
+            ],
           };
         }
 
         if (bundle && path) {
           return {
             isError: true,
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ error: '"bundle" and "path" are mutually exclusive — provide one, not both' }),
-            }],
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: '"bundle" and "path" are mutually exclusive — provide one, not both',
+                }),
+              },
+            ],
           };
         }
 
@@ -399,17 +447,19 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
         const vectorsRebuilt = await rebuildVectorIndex(restoredIds);
 
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              restored: true,
-              bundleVersion: parsed.version,
-              exportedAt: parsed.exportedAt,
-              conceptsRestored: restoredIds.length,
-              vectorsRebuilt,
-              errors: errors.length > 0 ? errors : undefined,
-            }),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                restored: true,
+                bundleVersion: parsed.version,
+                exportedAt: parsed.exportedAt,
+                conceptsRestored: restoredIds.length,
+                vectorsRebuilt,
+                errors: errors.length > 0 ? errors : undefined,
+              }),
+            },
+          ],
         };
       } catch (err) {
         return {

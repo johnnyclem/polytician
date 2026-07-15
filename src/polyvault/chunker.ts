@@ -69,9 +69,7 @@ export function reassembleChunks(chunks: ReassembleInput[]): Uint8Array {
 
   const expectedCount = chunks[0]!.chunkCount;
   if (chunks.length !== expectedCount) {
-    throw new ChunkReassemblyError(
-      `Expected ${expectedCount} chunks, received ${chunks.length}`
-    );
+    throw new ChunkReassemblyError(`Expected ${expectedCount} chunks, received ${chunks.length}`);
   }
 
   const sorted = [...chunks].sort((a, b) => a.chunkIndex - b.chunkIndex);
@@ -79,9 +77,7 @@ export function reassembleChunks(chunks: ReassembleInput[]): Uint8Array {
   for (let i = 0; i < sorted.length; i++) {
     const chunk = sorted[i]!;
     if (chunk.chunkIndex !== i) {
-      throw new ChunkReassemblyError(
-        `Missing chunk at index ${i}`
-      );
+      throw new ChunkReassemblyError(`Missing chunk at index ${i}`);
     }
     if (chunk.chunkCount !== expectedCount) {
       throw new ChunkReassemblyError(

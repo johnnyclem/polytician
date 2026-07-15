@@ -74,10 +74,7 @@ export class MemorySyncConnector {
       }
 
       if (entries.length > 0) {
-        await this.client.commit(
-          `polytician: upsert concept ${conceptId}`,
-          entries
-        );
+        await this.client.commit(`polytician: upsert concept ${conceptId}`, entries);
         logger.debug('av-sync pushed concept', { conceptId, entryCount: entries.length });
       }
     } catch (err) {

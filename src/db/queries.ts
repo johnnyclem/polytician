@@ -40,14 +40,12 @@ export function getUpdatedThoughtFormsSince(timestamp: number): ThoughtFormDelta
       thoughtform: concepts.thoughtform,
     })
     .from(concepts)
-    .where(
-      gt(concepts.updatedAt, timestamp),
-    )
+    .where(gt(concepts.updatedAt, timestamp))
     .orderBy(desc(concepts.updatedAt))
     .all()
-    .filter((row) => row.thoughtform !== null);
+    .filter(row => row.thoughtform !== null);
 
-  return rows.map((row) => ({
+  return rows.map(row => ({
     id: row.id,
     namespace: row.namespace ?? 'default',
     version: row.version ?? 1,

@@ -5,17 +5,7 @@ import type { Concept, ConceptRepresentations } from '../types/concept.js';
 import type { ThoughtForm } from '../types/thoughtform.js';
 import { VersionConflictError } from '../errors/index.js';
 import { conceptEventBus } from '../events/concept-events.js';
-
-function deserializeEmbedding(buf: Buffer | null): number[] | null {
-  if (!buf) return null;
-  const floats = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-  return Array.from(floats);
-}
-
-function serializeEmbedding(embedding: number[]): Buffer {
-  const floats = new Float32Array(embedding);
-  return Buffer.from(floats.buffer);
-}
+import { serializeEmbedding, deserializeEmbedding } from '../db/embedding-codec.js';
 
 function parseThoughtForm(raw: string | null): ThoughtForm | null {
   if (!raw) return null;
@@ -95,6 +85,12 @@ export class ConceptService {
         timestamp: now,
       });
     } else {
+      // A caller holding an expectedVersion believes the concept exists; if it
+      // is gone (e.g. concurrently deleted) that is a conflict, not a create.
+      if (params.expectedVersion !== undefined) {
+        throw new VersionConflictError(id, params.expectedVersion, 0);
+      }
+
       const tags = params.tags ?? [];
       const namespace = params.namespace ?? 'default';
       const row: ConceptRow = {

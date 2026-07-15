@@ -58,7 +58,7 @@ export interface MergeCommandResult {
  * 3. Write merged output and optional conflict report.
  */
 export async function runMerge(
-  options: MergeOptions,
+  options: MergeOptions
 ): Promise<{ result: MergeCommandResult; exitCode: number }> {
   const startMs = Date.now();
   vaultLogger.info('merge.start', {
@@ -90,14 +90,14 @@ export async function runMerge(
   const mergeResult: MergeResult = mergeThoughtformSets(
     localForms.data,
     remoteForms.data,
-    conflictOptions,
+    conflictOptions
   );
 
   // Count local-only and remote-only
-  const localIds = new Set(localForms.data.map((tf) => tf.id));
-  const remoteIds = new Set(remoteForms.data.map((tf) => tf.id));
-  const localOnlyCount = localForms.data.filter((tf) => !remoteIds.has(tf.id)).length;
-  const remoteOnlyCount = remoteForms.data.filter((tf) => !localIds.has(tf.id)).length;
+  const localIds = new Set(localForms.data.map(tf => tf.id));
+  const remoteIds = new Set(remoteForms.data.map(tf => tf.id));
+  const localOnlyCount = localForms.data.filter(tf => !remoteIds.has(tf.id)).length;
+  const remoteOnlyCount = remoteForms.data.filter(tf => !localIds.has(tf.id)).length;
 
   // Step 3: Write output
   if (options.out) {
@@ -111,7 +111,7 @@ export async function runMerge(
   const commandResult: MergeCommandResult = {
     status: 'ok',
     mergedCount: mergeResult.merged.length,
-    conflictCount: mergeResult.conflicts.filter((c) => c.outcome !== 'no-conflict').length,
+    conflictCount: mergeResult.conflicts.filter(c => c.outcome !== 'no-conflict').length,
     localOnlyCount,
     remoteOnlyCount,
   };
@@ -131,7 +131,7 @@ export async function runMerge(
 
 function readAndValidate(
   path: string,
-  label: string,
+  label: string
 ): { ok: true; data: ThoughtFormV1[] } | { ok: false; error: string } {
   let rawInput: unknown;
   try {
@@ -150,7 +150,7 @@ function readAndValidate(
   for (let i = 0; i < rawInput.length; i++) {
     const parsed = parseThoughtForm(rawInput[i]);
     if (!parsed.ok) {
-      const paths = parsed.errors.map((e) => `${e.path}: ${e.message}`).join('; ');
+      const paths = parsed.errors.map(e => `${e.path}: ${e.message}`).join('; ');
       return { ok: false, error: `${label} ThoughtForm[${i}] validation failed: ${paths}` };
     }
     forms.push(parsed.data);
@@ -162,7 +162,7 @@ function readAndValidate(
 function failMerge(
   message: string,
   exitCode: number,
-  startMs: number,
+  startMs: number
 ): { result: MergeCommandResult; exitCode: number } {
   const failure = classifyFailure(exitCode, message);
   vaultLogger.error('merge.failed', {

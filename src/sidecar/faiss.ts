@@ -27,7 +27,7 @@ const REBUILD_TIMEOUT_MS = 30_000;
  * treat it as a best-effort operation.
  */
 export async function rebuildFaissIndex(
-  req: RebuildIndexRequest,
+  req: RebuildIndexRequest
 ): Promise<RebuildIndexResponse | null> {
   const { sidecarUrl } = getConfig();
 
@@ -45,7 +45,7 @@ export async function rebuildFaissIndex(
     throw new Error('ids and texts must have the same length');
   }
 
-  const url = `${sidecarUrl}/rebuild-index`;
+  const url = `${sidecarUrl.replace(/\/+$/, '')}/rebuild-index`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REBUILD_TIMEOUT_MS);
 

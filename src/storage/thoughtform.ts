@@ -36,7 +36,7 @@ export interface SerializedBundle {
  */
 export function serializeBundle(
   thoughtforms: ThoughtForm[],
-  compress: boolean = true,
+  compress: boolean = true
 ): SerializedBundle {
   const json = JSON.stringify(thoughtforms);
   const rawSize = Buffer.byteLength(json, 'utf8');
@@ -136,12 +136,21 @@ export async function deserializeAndUpsertBundle(json: string | Buffer): Promise
     throw new ValidationError('Bundle is not valid JSON');
   }
 
+  // Accept both a bare ThoughtForm array and the versioned envelope produced
+  // by serializeThoughtFormsBundle, so serialize → deserialize round-trips.
+  if (
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    Array.isArray((parsed as { thoughtforms?: unknown }).thoughtforms)
+  ) {
+    parsed = (parsed as { thoughtforms: unknown }).thoughtforms;
+  }
+
   // Step 3: Validate with zod
   const result = ThoughtFormBundleSchema.safeParse(parsed);
   if (!result.success) {
-    const issues = result.error.issues
-      .map((i) => `${i.path.join('.')}: ${i.message}`)
-      .join('; ');
+    const issues = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new ValidationError(`Bundle validation failed: ${issues}`);
   }
 

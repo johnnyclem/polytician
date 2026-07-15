@@ -6,6 +6,7 @@ import type { NLPPipeline, NLPPipelineOptions } from '../providers/nlp-pipeline.
 import { NullProvider } from '../providers/null.provider.js';
 import { conceptService } from './concept.service.js';
 import { embeddingService } from './embedding.service.js';
+import { getConfig } from '../config.js';
 
 export class ConversionService {
   private llmProvider: LLMProvider = new NullProvider();
@@ -139,8 +140,11 @@ export class ConversionService {
 
     if (this.nlpPipeline) {
       // Use configurable NLP pipeline with dependency parsing enabled
+      const { nlp } = getConfig();
       const pipelineOptions: NLPPipelineOptions = {
         inferRelationships: true,
+        entityTypes: nlp.entityTypes,
+        minConfidence: nlp.minConfidence,
       };
       extracted = await this.nlpPipeline.extractEntities(concept.markdown, pipelineOptions);
     } else {

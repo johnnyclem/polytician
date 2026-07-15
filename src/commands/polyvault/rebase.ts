@@ -1,14 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { parseThoughtForm } from '../../lib/polyvault/validate.js';
-import {
-  rebase,
-  type RebaseInput,
-  type RebaseResult,
-} from '../../polyvault/rebase.js';
-import type {
-  ConflictPolicy,
-  PreferOrigin,
-} from '../../polyvault/conflict.js';
+import { rebase, type RebaseInput, type RebaseResult } from '../../polyvault/rebase.js';
+import type { ConflictPolicy, PreferOrigin } from '../../polyvault/conflict.js';
 import { vaultLogger, classifyFailure } from '../../polyvault/logger.js';
 import type { ThoughtFormV1 } from '../../schemas/thoughtform.js';
 
@@ -78,7 +71,7 @@ export interface RebaseCommandResult {
  * 5. Write rebased output, conflict report, and updated state.
  */
 export async function runRebase(
-  options: RebaseOptions,
+  options: RebaseOptions
 ): Promise<{ result: RebaseCommandResult; exitCode: number }> {
   const startMs = Date.now();
   vaultLogger.info('rebase.start', {
@@ -132,7 +125,7 @@ export async function runRebase(
     localBaseUpdatedAtMs: rebaseResult.newBaseUpdatedAtMs,
     observedRemoteMaxUpdatedAtMs: Math.max(
       state.observedRemoteMaxUpdatedAtMs,
-      ...remoteForms.data.map((tf) => tf.metadata.updatedAtMs),
+      ...remoteForms.data.map(tf => tf.metadata.updatedAtMs)
     ),
     lastRebasedAtMs: Date.now(),
   };
@@ -141,7 +134,7 @@ export async function runRebase(
   const commandResult: RebaseCommandResult = {
     status: 'ok',
     mergedCount: rebaseResult.merged.length,
-    conflictCount: rebaseResult.conflicts.filter((c) => c.outcome !== 'no-conflict').length,
+    conflictCount: rebaseResult.conflicts.filter(c => c.outcome !== 'no-conflict').length,
     remoteDeltaCount: rebaseResult.remoteDeltaCount,
     newBaseUpdatedAtMs: rebaseResult.newBaseUpdatedAtMs,
     skewSafeLowerBound: rebaseResult.skewSafeLowerBound,
@@ -162,7 +155,10 @@ export async function runRebase(
 
 function loadRebaseState(options: RebaseOptions): RebaseState {
   // Explicit overrides take priority
-  if (options.localBaseUpdatedAtMs !== undefined && options.observedRemoteMaxUpdatedAtMs !== undefined) {
+  if (
+    options.localBaseUpdatedAtMs !== undefined &&
+    options.observedRemoteMaxUpdatedAtMs !== undefined
+  ) {
     return {
       localBaseUpdatedAtMs: options.localBaseUpdatedAtMs,
       observedRemoteMaxUpdatedAtMs: options.observedRemoteMaxUpdatedAtMs,
@@ -207,7 +203,7 @@ function saveRebaseState(stateFile: string, state: RebaseState): void {
 
 function readAndValidate(
   path: string,
-  label: string,
+  label: string
 ): { ok: true; data: ThoughtFormV1[] } | { ok: false; error: string } {
   let rawInput: unknown;
   try {
@@ -226,7 +222,7 @@ function readAndValidate(
   for (let i = 0; i < rawInput.length; i++) {
     const parsed = parseThoughtForm(rawInput[i]);
     if (!parsed.ok) {
-      const paths = parsed.errors.map((e) => `${e.path}: ${e.message}`).join('; ');
+      const paths = parsed.errors.map(e => `${e.path}: ${e.message}`).join('; ');
       return { ok: false, error: `${label} ThoughtForm[${i}] validation failed: ${paths}` };
     }
     forms.push(parsed.data);
@@ -238,7 +234,7 @@ function readAndValidate(
 function failRebase(
   message: string,
   exitCode: number,
-  startMs: number,
+  startMs: number
 ): { result: RebaseCommandResult; exitCode: number } {
   const failure = classifyFailure(exitCode, message);
   vaultLogger.error('rebase.failed', {

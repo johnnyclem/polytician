@@ -1,9 +1,5 @@
 import { ZodError, type ZodSchema } from 'zod';
-import {
-  ThoughtFormV1Schema,
-  BundleV1Schema,
-  ChunkSchema,
-} from '../../schemas/index.js';
+import { ThoughtFormV1Schema, BundleV1Schema, ChunkSchema } from '../../schemas/index.js';
 import type { ThoughtFormV1, BundleV1, Chunk } from '../../schemas/index.js';
 
 // --- PolyVault schema parser / validator ---
@@ -29,7 +25,7 @@ export interface ValidationError {
 export type ParseResult<T> = ParseSuccess<T> | ParseFailure;
 
 function formatZodErrors(err: ZodError): ValidationError[] {
-  return err.issues.map((issue) => ({
+  return err.issues.map(issue => ({
     path: issue.path.join('.'),
     message: issue.message,
     code: issue.code,

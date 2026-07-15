@@ -1,7 +1,11 @@
 import { writeFileSync } from 'node:fs';
 import { parseBundle } from '../../lib/polyvault/validate.js';
 import { deserializeBundle } from '../../polyvault/serializer.js';
-import { reassembleChunks, ChunkIntegrityError, ChunkReassemblyError } from '../../polyvault/chunker.js';
+import {
+  reassembleChunks,
+  ChunkIntegrityError,
+  ChunkReassemblyError,
+} from '../../polyvault/chunker.js';
 import { decompress, type CompressionMode } from '../../polyvault/compress.js';
 import { createCryptoAdapter, type EncryptionMode } from '../../polyvault/crypto.js';
 import { sha256 } from '../../polyvault/hash.js';
@@ -172,7 +176,7 @@ export async function runRestore(
     let reassembled: Uint8Array;
     try {
       reassembled = reassembleChunks(
-        chunkRecords.map((c) => ({
+        chunkRecords.map(c => ({
           chunkIndex: c.chunkIndex,
           chunkCount: c.chunkCount,
           chunkHash: c.chunkHash,
@@ -204,7 +208,11 @@ export async function runRestore(
       }
       const adapter = createCryptoAdapter(options.encryption);
       try {
-        decrypted = await adapter.decrypt(reassembled, options.decryptionKey, options.decryptionNonce);
+        decrypted = await adapter.decrypt(
+          reassembled,
+          options.decryptionKey,
+          options.decryptionNonce
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return failRestore(
@@ -269,7 +277,7 @@ export async function runRestore(
 
     const parsed = parseBundle(rawBundle);
     if (!parsed.ok) {
-      const paths = parsed.errors.map((e) => `${e.path}: ${e.message}`).join('; ');
+      const paths = parsed.errors.map(e => `${e.path}: ${e.message}`).join('; ');
       return failRestore(
         `Bundle validation failed for commit ${commit.commitId}: ${paths}`,
         EXIT_VALIDATION,
