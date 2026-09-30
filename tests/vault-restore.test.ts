@@ -4,6 +4,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import type { ZodTypeAny } from 'zod';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
 // Mock @xenova/transformers
@@ -29,6 +30,7 @@ vi.mock('@xenova/transformers', () => {
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
 import { conceptService } from '../src/services/concept.service.js';
 import { getAdapter } from '../src/db/client.js';
+import { resetConfig } from '../src/config.js';
 
 // Import the vault-tools module to access the helpers via the tool registration
 // Since deserializeBundle and rebuildVectorIndex are not exported, we test them
@@ -48,11 +50,11 @@ function makeEmbedding(seed: number): number[] {
 }
 
 // We'll test the vault_restore tool via a minimal mock MCP server that captures
-// the registered tool handlers.
+// the registered tool handlers and, like the SDK, validates arguments against
+// the tool's input schema before calling the handler.
 interface ToolRegistration {
   name: string;
   description: string;
-  schema: Record<string, unknown>;
   handler: (args: Record<string, unknown>) => Promise<{
     content: Array<{ type: string; text: string }>;
     isError?: boolean;
@@ -60,22 +62,21 @@ interface ToolRegistration {
 }
 
 function createMockServer(): { tools: ToolRegistration[] } & {
-  tool: (
+  registerTool: (
     name: string,
-    description: string,
-    schema: Record<string, unknown>,
+    config: { description: string; inputSchema: ZodTypeAny },
     handler: (args: Record<string, unknown>) => Promise<unknown>
   ) => void;
 } {
   const tools: ToolRegistration[] = [];
   return {
     tools,
-    tool(name, description, schema, handler) {
+    registerTool(name, config, handler) {
       tools.push({
         name,
-        description,
-        schema,
-        handler: handler as ToolRegistration['handler'],
+        description: config.description,
+        handler: (async (args: Record<string, unknown>) =>
+          handler(config.inputSchema.parse(args) as Record<string, unknown>)) as ToolRegistration['handler'],
       });
     },
   };
@@ -230,7 +231,7 @@ describe('vault_restore tool', () => {
     const adapter = getAdapter();
     const floats = new Float32Array(embedding);
     const queryBuf = Buffer.from(floats.buffer);
-    const searchResults = await adapter.vectorSearch(queryBuf, 5);
+    const searchResults = await adapter.vectorSearch(queryBuf, 5, { namespaces: null });
     expect(searchResults.length).toBeGreaterThan(0);
     expect(searchResults[0]!.concept_id).toBe('dddddddd-dddd-4ddd-dddd-dddddddddddd');
   });
@@ -272,6 +273,66 @@ describe('vault_restore tool', () => {
     const parsed = JSON.parse(result.content[0]!.text);
     expect(parsed.restored).toBe(true);
     expect(parsed.conceptsRestored).toBe(2);
+  });
+
+  it('should not overwrite a concept that lives in another namespace', async () => {
+    const id = '0e000000-0000-4000-a000-000000000001';
+    await conceptService.save({ id, namespace: 'agent-b', markdown: '# B original' });
+
+    const result = await restoreTool.handler({
+      bundle: { version: 1, concepts: [{ id, markdown: '# overwritten by restore' }] },
+    });
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.conceptsRestored).toBe(0);
+    expect(parsed.errors[0].id).toBe(id);
+    expect(parsed.errors[0].error).toMatch(/different namespace/);
+    expect((await conceptService.read(id)).markdown).toBe('# B original');
+  });
+
+  it('should refuse concepts whose namespace is outside POLYTICIAN_NAMESPACES', async () => {
+    process.env['POLYTICIAN_NAMESPACES'] = 'agent-a';
+    resetConfig();
+    try {
+      const result = await restoreTool.handler({
+        bundle: {
+          version: 1,
+          concepts: [
+            { id: '0e000000-0000-4000-a000-000000000002', namespace: 'agent-a', markdown: '# a' },
+            { id: '0e000000-0000-4000-a000-000000000003', namespace: 'agent-z', markdown: '# z' },
+          ],
+        },
+      });
+      const parsed = JSON.parse(result.content[0]!.text);
+      expect(parsed.conceptsRestored).toBe(1);
+      expect(parsed.errors).toEqual([
+        { id: '0e000000-0000-4000-a000-000000000003', error: expect.stringMatching(/allowlist/) },
+      ]);
+    } finally {
+      delete process.env['POLYTICIAN_NAMESPACES'];
+      resetConfig();
+    }
+  });
+
+  it('should reject invalid thoughtforms and embeddings per concept', async () => {
+    const result = await restoreTool.handler({
+      bundle: {
+        version: 1,
+        concepts: [
+          { id: '0e000000-0000-4000-a000-000000000004', thoughtform: { free: 'form' } },
+          { id: '0e000000-0000-4000-a000-000000000005', markdown: 'x', embedding: [1, 2, 3] },
+        ],
+      },
+    });
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.conceptsRestored).toBe(0);
+    expect(parsed.errors).toHaveLength(2);
+    expect((await conceptService.getStats()).conceptCount).toBe(0);
+  });
+
+  it('should reject unknown arguments', async () => {
+    await expect(restoreTool.handler({ bundle: { concepts: [] }, force: true })).rejects.toThrow(
+      /unrecognized/i
+    );
   });
 
   it('should handle nonexistent file path', async () => {

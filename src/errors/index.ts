@@ -45,3 +45,20 @@ export class VersionConflictError extends PolyticianError {
     this.currentVersion = currentVersion;
   }
 }
+
+/** The caller may not address this namespace (allowlist, cross-namespace gate, or a namespace move). */
+export class NamespaceDeniedError extends PolyticianError {
+  constructor(message: string) {
+    super(message, 'NAMESPACE_DENIED');
+  }
+}
+
+/** A derived representation would replace an authored one and `overwrite` was not set. */
+export class OverwriteRefusedError extends PolyticianError {
+  constructor(id: string, representation: string) {
+    super(
+      `Concept '${id}' already has an authored ${representation} representation; pass overwrite: true to replace it with derived content`,
+      'OVERWRITE_REFUSED'
+    );
+  }
+}

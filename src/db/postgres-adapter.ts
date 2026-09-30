@@ -2,113 +2,293 @@ import pg from 'pg';
 import type {
   DatabaseAdapter,
   ConceptRow,
+  ConceptUpdateFields,
+  ConceptWrite,
+  WriteOutcome,
   ListRow,
+  VectorFilter,
   VectorResult,
   ConceptMetaRow,
   StatsResult,
 } from './adapter.js';
+import { VECTOR_DIMENSION, embeddingProblem } from '../types/concept.js';
+import { deserializeEmbedding } from './embedding-codec.js';
 
 const { Pool } = pg;
+
+/** Bumped when initialize() gains a migration step. */
+const SCHEMA_VERSION = 3;
+
+/** Advisory lock key serializing migrations across nodes sharing one database. */
+const MIGRATION_LOCK_KEY = 0x706f6c79; // 'poly'
+
+/** pgvector's upper bound for hnsw.ef_search. */
+const MAX_EF_SEARCH = 1000;
+
+/** Columns ConceptUpdateFields may set; guards the dynamic SET clause. */
+const UPDATABLE_COLUMNS = new Set([
+  'version',
+  'updated_at',
+  'tags',
+  'markdown',
+  'thoughtform',
+  'embedding',
+  'derived',
+]);
+
+/** pgvector text literal for a Float32 embedding buffer. */
+function toPgVector(embedding: Buffer): string {
+  const floats = new Float32Array(embedding.buffer, embedding.byteOffset, embedding.byteLength / 4);
+  return `[${Array.from(floats).join(',')}]`;
+}
+
+function versionAtLeast(version: string, major: number, minor: number): boolean {
+  const [maj = 0, min = 0] = version.split('.').map(n => parseInt(n, 10));
+  return maj > major || (maj === major && min >= minor);
+}
 
 /**
  * PostgreSQL adapter using pgvector for vector similarity search.
  *
  * Requires:
- *  - PostgreSQL 15+ with pgvector extension installed
+ *  - PostgreSQL 15+ with pgvector >= 0.5 (HNSW); >= 0.8 recommended so
+ *    filtered searches use HNSW iterative scans instead of an exact scan
  *  - A connection string via config (e.g. POLYTICIAN_POSTGRES_URL)
  */
 export class PostgresAdapter implements DatabaseAdapter {
   private pool: pg.Pool;
+  /** pgvector >= 0.8: filtered HNSW scans keep going until LIMIT rows match. */
+  private iterativeScan = false;
 
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString });
   }
 
   async initialize(): Promise<void> {
-    await this.pool.query('CREATE EXTENSION IF NOT EXISTS vector');
+    await this.withTransaction(async client => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_KEY]);
+      await client.query('CREATE EXTENSION IF NOT EXISTS vector');
 
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS concepts (
-        id TEXT PRIMARY KEY,
-        namespace TEXT NOT NULL DEFAULT 'default',
-        version INTEGER NOT NULL DEFAULT 1,
-        created_at BIGINT NOT NULL,
-        updated_at BIGINT NOT NULL,
-        tags TEXT DEFAULT '[]',
-        markdown TEXT,
-        thoughtform TEXT,
-        embedding BYTEA
-      )
-    `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS concepts (
+          id TEXT PRIMARY KEY,
+          namespace TEXT NOT NULL DEFAULT 'default',
+          version INTEGER NOT NULL DEFAULT 1,
+          created_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL,
+          tags TEXT DEFAULT '[]',
+          markdown TEXT,
+          thoughtform TEXT,
+          embedding BYTEA,
+          derived TEXT NOT NULL DEFAULT '{}'
+        )
+      `);
 
-    // Add namespace and version columns if missing (migration for existing DBs)
-    await this.pool.query(`
-      DO $$ BEGIN
+      // Add columns introduced after the first release (migration for existing DBs)
+      await client.query(`
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
-      END $$;
-    `);
+        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS derived TEXT NOT NULL DEFAULT '{}';
+      `);
 
-    await this.pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)
-    `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)`);
+      await client.query(
+        `CREATE INDEX IF NOT EXISTS idx_concepts_namespace ON concepts(namespace, updated_at)`
+      );
 
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS metadata (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      `);
 
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS concept_vectors (
-        concept_id TEXT PRIMARY KEY REFERENCES concepts(id) ON DELETE CASCADE,
-        embedding vector(384) NOT NULL
-      )
-    `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS concept_vectors (
+          concept_id TEXT PRIMARY KEY REFERENCES concepts(id) ON DELETE CASCADE,
+          embedding vector(${VECTOR_DIMENSION}) NOT NULL
+        )
+      `);
 
-    await this.pool
-      .query(
-        `
-      CREATE INDEX IF NOT EXISTS idx_concept_vectors_embedding
-      ON concept_vectors USING ivfflat (embedding vector_l2_ops)
-      WITH (lists = 100)
-    `
-      )
-      .catch(async () => {
-        // IVFFlat index requires rows to exist; fall back to no index initially.
-        // For small datasets this is fine — the index can be created later.
-        // Try HNSW instead which doesn't have the minimum rows requirement.
-        await this.pool
-          .query(
-            `
-        CREATE INDEX IF NOT EXISTS idx_concept_vectors_embedding
-        ON concept_vectors USING hnsw (embedding vector_l2_ops)
-      `
-          )
-          .catch(() => {
-            // If HNSW also fails (older pgvector), queries still work via sequential scan.
-          });
-      });
+      const current = await client.query<{ value: string }>(
+        `SELECT value FROM metadata WHERE key = 'schema_version'`
+      );
+      const from = current.rows[0] ? parseInt(current.rows[0].value, 10) : 0;
+      if (from < SCHEMA_VERSION) {
+        await this.migrateToV3(client);
+        await client.query(
+          `INSERT INTO metadata (key, value) VALUES ('schema_version', $1)
+           ON CONFLICT (key) DO UPDATE SET value = $1`,
+          [String(SCHEMA_VERSION)]
+        );
+      }
+    });
+
+    const ext = await this.pool.query<{ extversion: string }>(
+      `SELECT extversion FROM pg_extension WHERE extname = 'vector'`
+    );
+    this.iterativeScan = versionAtLeast(ext.rows[0]?.extversion ?? '0', 0, 8);
+  }
+
+  /**
+   * 3.0: search ranks by cosine distance through an HNSW index. 2.x created
+   * an IVFFlat (L2, lists=100) index at startup on an empty table, which
+   * pgvector accepts but which gives very low recall. Also clears embeddings
+   * that can never be searched and re-indexes rows whose vector write was
+   * lost by the non-atomic 2.x save.
+   */
+  private async migrateToV3(client: pg.PoolClient): Promise<void> {
+    await client.query('DROP INDEX IF EXISTS idx_concept_vectors_embedding');
+    try {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_concept_vectors_embedding_cosine
+        ON concept_vectors USING hnsw (embedding vector_cosine_ops)
+      `);
+    } catch (err) {
+      throw new Error(
+        `pgvector >= 0.5.0 is required for the HNSW index: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    const stored = await client.query<{ id: string; embedding: Buffer; indexed: boolean }>(
+      `SELECT c.id, c.embedding, v.concept_id IS NOT NULL AS indexed FROM concepts c
+       LEFT JOIN concept_vectors v ON v.concept_id = c.id
+       WHERE c.embedding IS NOT NULL`
+    );
+    for (const row of stored.rows) {
+      const embedding = Buffer.from(row.embedding);
+      const usable =
+        embedding.byteLength === VECTOR_DIMENSION * 4 &&
+        embeddingProblem(deserializeEmbedding(embedding)) === null;
+      if (!usable) {
+        // Never searchable (wrong length, non-finite or zero): drop it.
+        await client.query('UPDATE concepts SET embedding = NULL WHERE id = $1', [row.id]);
+        await client.query('DELETE FROM concept_vectors WHERE concept_id = $1', [row.id]);
+      } else if (!row.indexed) {
+        await this.upsertVectorWith(client, row.id, embedding);
+      }
+    }
   }
 
   async close(): Promise<void> {
     await this.pool.end();
   }
 
+  /** Run fn in a transaction on a dedicated client; rolls back and rethrows on error. */
+  private async withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async findConcept(id: string): Promise<ConceptRow | null> {
     const result = await this.pool.query(
-      'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = $1',
+      'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived FROM concepts WHERE id = $1',
       [id]
     );
     if (result.rows.length === 0) return null;
     return this.toConceptRow(result.rows[0]);
   }
 
+  async applyWrites(writes: ConceptWrite[]): Promise<WriteOutcome> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const [index, write] of writes.entries()) {
+        if (!(await this.applyWrite(client, write))) {
+          await client.query('ROLLBACK');
+          return { ok: false, index };
+        }
+      }
+      await client.query('COMMIT');
+      return { ok: true };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Runs inside applyWrites' transaction; false means the precondition failed. */
+  private async applyWrite(client: pg.PoolClient, write: ConceptWrite): Promise<boolean> {
+    switch (write.kind) {
+      case 'insert': {
+        const { row } = write;
+        const inserted = await client.query(
+          `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING`,
+          [
+            row.id,
+            row.namespace,
+            row.version,
+            row.created_at,
+            row.updated_at,
+            row.tags,
+            row.markdown,
+            row.thoughtform,
+            row.embedding,
+            row.derived ?? '{}',
+          ]
+        );
+        if (inserted.rowCount === 0) return false;
+        if (row.embedding) await this.upsertVectorWith(client, row.id, row.embedding);
+        return true;
+      }
+      case 'update': {
+        const entries = this.updateEntries(write.fields);
+        const setClause = entries.map(([k], i) => `${k} = $${i + 1}`).join(', ');
+        // Under READ COMMITTED a concurrent writer's UPDATE blocks on the row
+        // lock, then re-checks `version` against the committed row, so only
+        // one writer holding a given expectedVersion can match.
+        const updated = await client.query(
+          `UPDATE concepts SET ${setClause} WHERE id = $${entries.length + 1} AND version = $${entries.length + 2}`,
+          [...entries.map(([, v]) => v), write.id, write.expectedVersion]
+        );
+        if (updated.rowCount === 0) return false;
+        if (write.fields.embedding === null) {
+          await client.query('DELETE FROM concept_vectors WHERE concept_id = $1', [write.id]);
+        } else if (write.fields.embedding) {
+          await this.upsertVectorWith(client, write.id, write.fields.embedding);
+        }
+        return true;
+      }
+      case 'delete': {
+        // concept_vectors has ON DELETE CASCADE.
+        const deleted =
+          write.namespace === undefined
+            ? await client.query('DELETE FROM concepts WHERE id = $1', [write.id])
+            : await client.query('DELETE FROM concepts WHERE id = $1 AND namespace = $2', [
+                write.id,
+                write.namespace,
+              ]);
+        return (deleted.rowCount ?? 0) > 0;
+      }
+    }
+  }
+
+  private updateEntries(fields: ConceptUpdateFields): Array<[string, unknown]> {
+    const entries = Object.entries(fields).filter(([, v]) => v !== undefined);
+    for (const [key] of entries) {
+      if (!UPDATABLE_COLUMNS.has(key)) throw new Error(`Cannot update column '${key}'`);
+    }
+    if (entries.length === 0) throw new Error('Update has no fields');
+    return entries;
+  }
+
   async insertConcept(row: ConceptRow): Promise<void> {
     await this.pool.query(
-      `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         row.id,
         row.namespace,
@@ -119,17 +299,17 @@ export class PostgresAdapter implements DatabaseAdapter {
         row.markdown,
         row.thoughtform,
         row.embedding,
+        row.derived ?? '{}',
       ]
     );
   }
 
-  async updateConcept(id: string, fields: Record<string, unknown>): Promise<void> {
-    const keys = Object.keys(fields);
-    if (keys.length === 0) return;
-    const setClauses = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-    const values = Object.values(fields);
-    await this.pool.query(`UPDATE concepts SET ${setClauses} WHERE id = $${keys.length + 1}`, [
-      ...values,
+  async updateConcept(id: string, fields: ConceptUpdateFields): Promise<void> {
+    if (Object.values(fields).every(v => v === undefined)) return;
+    const entries = this.updateEntries(fields);
+    const setClause = entries.map(([k], i) => `${k} = $${i + 1}`).join(', ');
+    await this.pool.query(`UPDATE concepts SET ${setClause} WHERE id = $${entries.length + 1}`, [
+      ...entries.map(([, v]) => v),
       id,
     ]);
   }
@@ -155,10 +335,9 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
 
     if (params.tags && params.tags.length > 0) {
-      for (const tag of params.tags) {
-        conditions.push(`tags LIKE $${paramIdx++}`);
-        queryParams.push(`%"${tag}"%`);
-      }
+      // jsonb containment: every tag must be an element of the array (exact match).
+      conditions.push(`tags::jsonb @> $${paramIdx++}::jsonb`);
+      queryParams.push(JSON.stringify(params.tags));
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -196,18 +375,19 @@ export class PostgresAdapter implements DatabaseAdapter {
     };
   }
 
-  async upsertVector(id: string, embedding: Buffer): Promise<void> {
-    const floats = new Float32Array(
-      embedding.buffer,
-      embedding.byteOffset,
-      embedding.byteLength / 4
-    );
-    const pgVector = `[${Array.from(floats).join(',')}]`;
+  async upsertVector(id: string, _namespace: string, embedding: Buffer): Promise<void> {
+    await this.upsertVectorWith(this.pool, id, embedding);
+  }
 
-    await this.pool.query(
+  private async upsertVectorWith(
+    db: pg.Pool | pg.PoolClient,
+    id: string,
+    embedding: Buffer
+  ): Promise<void> {
+    await db.query(
       `INSERT INTO concept_vectors (concept_id, embedding) VALUES ($1, $2)
        ON CONFLICT (concept_id) DO UPDATE SET embedding = $2`,
-      [id, pgVector]
+      [id, toPgVector(embedding)]
     );
   }
 
@@ -215,23 +395,47 @@ export class PostgresAdapter implements DatabaseAdapter {
     await this.pool.query('DELETE FROM concept_vectors WHERE concept_id = $1', [id]);
   }
 
-  async vectorSearch(queryEmbedding: Buffer, k: number): Promise<VectorResult[]> {
-    const floats = new Float32Array(
-      queryEmbedding.buffer,
-      queryEmbedding.byteOffset,
-      queryEmbedding.byteLength / 4
-    );
-    const pgVector = `[${Array.from(floats).join(',')}]`;
+  async vectorSearch(
+    queryEmbedding: Buffer,
+    k: number,
+    filter: VectorFilter
+  ): Promise<VectorResult[]> {
+    const params: unknown[] = [toPgVector(queryEmbedding)];
+    const conditions: string[] = [];
 
-    const result = await this.pool.query(
-      `SELECT concept_id, embedding <-> $1::vector as distance
-       FROM concept_vectors
-       ORDER BY embedding <-> $1::vector
-       LIMIT $2`,
-      [pgVector, k]
-    );
+    if (filter.namespaces !== null) {
+      if (filter.namespaces.length === 0) return [];
+      params.push([...filter.namespaces]);
+      conditions.push(`c.namespace = ANY($${params.length}::text[])`);
+    }
+    if (filter.tags && filter.tags.length > 0) {
+      params.push(JSON.stringify(filter.tags));
+      conditions.push(`c.tags::jsonb @> $${params.length}::jsonb`);
+    }
+    params.push(k);
 
-    return result.rows.map(r => ({
+    const filtered = conditions.length > 0;
+    const sql = `SELECT v.concept_id, v.embedding <=> $1::vector AS distance
+       FROM concept_vectors v ${filtered ? 'JOIN concepts c ON c.id = v.concept_id' : ''}
+       ${filtered ? `WHERE ${conditions.join(' AND ')}` : ''}
+       ORDER BY v.embedding <=> $1::vector
+       LIMIT $${params.length}`;
+
+    // An HNSW scan yields at most ef_search candidates, and WHERE is applied
+    // to those candidates. So: raise ef_search to k; for filtered queries use
+    // an iterative scan (pgvector >= 0.8) or, on older pgvector, an exact
+    // scan. Without this, filters silently drop matches (fewer than k rows).
+    const efSearch = Math.max(40, Math.min(MAX_EF_SEARCH, Math.ceil(k)));
+    const exact = k > MAX_EF_SEARCH || (filtered && !this.iterativeScan);
+
+    const rows = await this.withTransaction(async client => {
+      await client.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+      if (exact) await client.query('SET LOCAL enable_indexscan = off');
+      else if (filtered) await client.query('SET LOCAL hnsw.iterative_scan = strict_order');
+      return (await client.query(sql, params)).rows;
+    });
+
+    return rows.map(r => ({
       concept_id: r.concept_id as string,
       distance: Number(r.distance),
     }));
@@ -319,6 +523,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       markdown: (row.markdown as string) ?? null,
       thoughtform: (row.thoughtform as string) ?? null,
       embedding: row.embedding ? Buffer.from(row.embedding as Buffer) : null,
+      derived: (row.derived as string) ?? '{}',
     };
   }
 }

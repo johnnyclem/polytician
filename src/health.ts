@@ -36,8 +36,10 @@ async function checkDatabase(): Promise<CheckResult> {
 async function checkVectorIndex(): Promise<CheckResult> {
   try {
     const adapter = getAdapter();
-    // Quick check: vector search with a zero query should not throw
-    await adapter.vectorSearch(serializeEmbedding(new Array<number>(VECTOR_DIMENSION).fill(0)), 1);
+    // Quick check: a 1-NN query over all namespaces should not throw
+    const probe = new Array<number>(VECTOR_DIMENSION).fill(0);
+    probe[0] = 1;
+    await adapter.vectorSearch(serializeEmbedding(probe), 1, { namespaces: null });
     return { status: 'ok' };
   } catch (err) {
     return { status: 'error', error: err instanceof Error ? err.message : String(err) };

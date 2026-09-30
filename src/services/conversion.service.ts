@@ -1,12 +1,44 @@
-import type { RepresentationType } from '../types/concept.js';
+import type { Concept, Provenance, RepresentationType } from '../types/concept.js';
 import type { ThoughtForm } from '../types/thoughtform.js';
-import { ThoughtFormSchema } from '../types/thoughtform.js';
+import {
+  StoredThoughtFormSchema,
+  ThoughtFormSchema,
+  thoughtFormText,
+  viewThoughtForm,
+  type StoredThoughtForm,
+  type ThoughtFormView,
+} from '../types/thoughtform.js';
 import type { LLMProvider, ThoughtFormEntities } from '../providers/llm.interface.js';
 import type { NLPPipeline, NLPPipelineOptions } from '../providers/nlp-pipeline.interface.js';
 import { NullProvider } from '../providers/null.provider.js';
-import { conceptService } from './concept.service.js';
+import { ConversionError, OverwriteRefusedError } from '../errors/index.js';
+import { conceptService, type SaveParams } from './concept.service.js';
 import { embeddingService } from './embedding.service.js';
 import { getConfig } from '../config.js';
+
+/** Nearest neighbours given to the LLM as context for vector → markdown/thoughtform. */
+const NEIGHBOR_COUNT = 5;
+
+type ReadConcept = Partial<Concept> & { id: string };
+
+export interface ConvertOptions {
+  /** If set, the concept must live in this namespace (otherwise NOT_FOUND). */
+  namespace?: string;
+  /** Allow the derived result to replace an authored representation. */
+  overwrite?: boolean;
+}
+
+function hasRepresentation(concept: ReadConcept, rep: RepresentationType): boolean {
+  if (rep === 'vector') return concept.embedding !== undefined;
+  if (rep === 'markdown') return concept.markdown !== undefined;
+  return concept.thoughtform !== undefined;
+}
+
+/** A converted representation, ready to save with its provenance. */
+type Derivation =
+  | { to: 'vector'; value: number[]; provenance: Provenance }
+  | { to: 'markdown'; value: string; provenance: Provenance }
+  | { to: 'thoughtform'; value: ThoughtForm; provenance: Provenance };
 
 export class ConversionService {
   private llmProvider: LLMProvider = new NullProvider();
@@ -28,82 +60,108 @@ export class ConversionService {
     return this.nlpPipeline?.name ?? null;
   }
 
-  async convert(id: string, from: RepresentationType, to: RepresentationType): Promise<void> {
-    if (from === to) throw new Error(`Cannot convert from '${from}' to itself`);
+  /**
+   * Derive `to` from `from` and save it as a derived representation.
+   *
+   * The result is written with the version the source was read at, so a
+   * concurrent edit of the source surfaces as VERSION_CONFLICT rather than a
+   * stale derivation. It never replaces an authored representation unless
+   * `overwrite` is set; replacing an earlier derived one is allowed.
+   */
+  async convert(
+    id: string,
+    from: RepresentationType,
+    to: RepresentationType,
+    options: ConvertOptions = {}
+  ): Promise<void> {
+    if (from === to) throw new ConversionError(`Cannot convert from '${from}' to itself`);
 
-    const concept = await conceptService.read(id);
+    const concept = await conceptService.read(id, undefined, { namespace: options.namespace });
 
-    const key = `${from}->${to}`;
-    switch (key) {
+    if (!hasRepresentation(concept, from)) {
+      throw new ConversionError(
+        `Concept '${id}' has no ${from} representation. Available: check with read_concept.`
+      );
+    }
+    // Checked again atomically on save; failing early avoids a wasted LLM call.
+    if (hasRepresentation(concept, to) && !concept.derived?.[to] && !options.overwrite) {
+      throw new OverwriteRefusedError(id, to);
+    }
+
+    const derivation = await this.derive(concept, from, to);
+
+    const save: SaveParams = {
+      id,
+      namespace: concept.namespace,
+      expectedVersion: concept.version,
+      derived: { [derivation.to]: derivation.provenance },
+      overwrite: options.overwrite,
+    };
+    if (derivation.to === 'vector') save.embedding = derivation.value;
+    else if (derivation.to === 'markdown') save.markdown = derivation.value;
+    else save.thoughtform = derivation.value;
+    await conceptService.save(save);
+  }
+
+  private async derive(
+    concept: ReadConcept,
+    from: RepresentationType,
+    to: RepresentationType
+  ): Promise<Derivation> {
+    switch (`${from}->${to}`) {
       case 'markdown->vector':
-        await this.markdownToVector(id, concept);
-        break;
+        return this.markdownToVector(concept);
       case 'thoughtform->vector':
-        await this.thoughtformToVector(id, concept);
-        break;
+        return this.thoughtformToVector(concept);
       case 'thoughtform->markdown':
-        await this.thoughtformToMarkdown(id, concept);
-        break;
+        return this.thoughtformToMarkdown(concept);
       case 'markdown->thoughtform':
-        await this.markdownToThoughtform(id, concept);
-        break;
+        return this.markdownToThoughtform(concept);
       case 'vector->markdown':
-        await this.vectorToMarkdown(id, concept);
-        break;
+        return this.vectorToMarkdown(concept);
       case 'vector->thoughtform':
-        await this.vectorToThoughtform(id, concept);
-        break;
+        return this.vectorToThoughtform(concept);
       default:
-        throw new Error(`Unsupported conversion: ${from} -> ${to}`);
+        throw new ConversionError(`Unsupported conversion: ${from} -> ${to}`);
     }
   }
 
   // --- Non-LLM conversions ---
 
-  private async markdownToVector(id: string, concept: { markdown?: string | null }): Promise<void> {
-    if (!concept.markdown) {
-      throw new Error(
-        `Concept '${id}' has no markdown representation. Available: check with read_concept.`
-      );
-    }
-    const embedding = await embeddingService.embed(concept.markdown);
-    await conceptService.save({ id, embedding });
+  private async markdownToVector(concept: ReadConcept): Promise<Derivation> {
+    const markdown = this.requireMarkdown(concept);
+    const value = await embeddingService.embed(markdown);
+    return { to: 'vector', value, provenance: { from: 'markdown' } };
   }
 
-  private async thoughtformToVector(
-    id: string,
-    concept: { thoughtform?: ThoughtForm | null }
-  ): Promise<void> {
-    if (!concept.thoughtform) {
-      throw new Error(`Concept '${id}' has no thoughtform representation.`);
-    }
-    const embedding = await embeddingService.embed(concept.thoughtform.rawText);
-    await conceptService.save({ id, embedding });
+  private async thoughtformToVector(concept: ReadConcept): Promise<Derivation> {
+    const tf = this.requireThoughtForm(concept);
+    const text = thoughtFormText(tf);
+    if (!text)
+      throw new ConversionError(`Concept '${concept.id}' thoughtform has no text to embed.`);
+    const value = await embeddingService.embed(text);
+    return { to: 'vector', value, provenance: { from: 'thoughtform' } };
   }
 
-  private async thoughtformToMarkdown(
-    id: string,
-    concept: { thoughtform?: ThoughtForm | null }
-  ): Promise<void> {
-    if (!concept.thoughtform) {
-      throw new Error(`Concept '${id}' has no thoughtform representation.`);
-    }
-
-    const tf = concept.thoughtform;
+  private async thoughtformToMarkdown(concept: ReadConcept): Promise<Derivation> {
+    const tf: ThoughtFormView = viewThoughtForm(this.requireThoughtForm(concept));
     const lines: string[] = [];
 
-    lines.push(`# ${tf.rawText.slice(0, 80)}`);
-    lines.push('');
-    lines.push(tf.rawText);
+    const title = tf.rawText ?? tf.entities.map(e => e.text).join(', ');
+    lines.push(`# ${title.slice(0, 80)}`);
+    if (tf.rawText) {
+      lines.push('');
+      lines.push(tf.rawText);
+    }
 
     if (tf.entities.length > 0) {
       lines.push('');
       lines.push('## Entities');
       lines.push('');
       for (const entity of tf.entities) {
-        lines.push(
-          `- **${entity.text}** (${entity.type}, confidence: ${entity.confidence.toFixed(2)})`
-        );
+        const confidence =
+          entity.confidence !== undefined ? `, confidence: ${entity.confidence.toFixed(2)}` : '';
+        lines.push(`- **${entity.text}** (${entity.type}${confidence})`);
       }
     }
 
@@ -118,8 +176,7 @@ export class ConversionService {
       }
     }
 
-    const markdown = lines.join('\n');
-    await conceptService.save({ id, markdown });
+    return { to: 'markdown', value: lines.join('\n'), provenance: { from: 'thoughtform' } };
   }
 
   // --- LLM / NLP pipeline conversions ---
@@ -128,15 +185,11 @@ export class ConversionService {
    * Convert markdown to ThoughtForm using either a configured NLP pipeline
    * or the LLM provider. Results are validated against the ThoughtForm schema.
    */
-  private async markdownToThoughtform(
-    id: string,
-    concept: { markdown?: string | null }
-  ): Promise<void> {
-    if (!concept.markdown) {
-      throw new Error(`Concept '${id}' has no markdown representation.`);
-    }
+  private async markdownToThoughtform(concept: ReadConcept): Promise<Derivation> {
+    const markdown = this.requireMarkdown(concept);
 
     let extracted: ThoughtFormEntities;
+    let provider: string;
 
     if (this.nlpPipeline) {
       // Use configurable NLP pipeline with dependency parsing enabled
@@ -146,105 +199,99 @@ export class ConversionService {
         entityTypes: nlp.entityTypes,
         minConfidence: nlp.minConfidence,
       };
-      extracted = await this.nlpPipeline.extractEntities(concept.markdown, pipelineOptions);
+      extracted = await this.nlpPipeline.extractEntities(markdown, pipelineOptions);
+      provider = this.nlpPipeline.name;
     } else {
       // Fall back to LLM-based entity extraction
-      extracted = await this.llmProvider.extractEntities(concept.markdown);
+      this.requireLLM('markdown -> thoughtform (without POLYTICIAN_NLP_PIPELINE=rule-based)');
+      extracted = await this.llmProvider.extractEntities(markdown);
+      provider = this.llmProvider.name;
     }
 
-    const now = new Date().toISOString();
-    const thoughtform: ThoughtForm = {
-      id,
-      rawText: concept.markdown,
-      language: 'en',
-      metadata: {
-        createdAt: now,
-        updatedAt: now,
-        author: null,
-        tags: [],
-        source: 'converted',
-      },
-      entities: extracted.entities,
-      relationships: extracted.relationships,
-      contextGraph: extracted.contextGraph,
-    };
-
-    // Validate against schema before saving
-    this.validateThoughtForm(thoughtform);
-
-    await conceptService.save({ id, thoughtform });
+    const thoughtform = this.buildThoughtForm(concept.id, markdown, extracted);
+    return { to: 'thoughtform', value: thoughtform, provenance: { from: 'markdown', provider } };
   }
 
   /**
-   * Convert vector to markdown. When an LLM is configured, uses the LLM
-   * summarizer with nearest-neighbor context in the prompt. Without an LLM,
-   * reconstructs markdown directly from neighbor content.
+   * Convert vector to markdown by asking the LLM to summarize the concept's
+   * nearest neighbours in its own namespace. There is no non-LLM path: a
+   * vector cannot be decoded back to text, and splicing neighbours' text in
+   * as this concept's markdown would present other concepts' content as its own.
    */
-  private async vectorToMarkdown(
-    id: string,
-    concept: { embedding?: number[] | null }
-  ): Promise<void> {
-    if (!concept.embedding) {
-      throw new Error(`Concept '${id}' has no vector representation.`);
-    }
-
-    const neighbors = await conceptService.search(concept.embedding, 5);
-    const neighborData: Array<{ text: string; distance: number }> = [];
-    for (const n of neighbors) {
-      if (n.id === id) continue;
-      const neighborConcept = await conceptService.read(n.id);
-      const text =
-        neighborConcept.markdown ??
-        (neighborConcept.thoughtform ? (neighborConcept.thoughtform as ThoughtForm).rawText : null);
-      if (text) {
-        neighborData.push({ text, distance: n.distance });
-      }
-    }
-
-    let markdown: string;
-
-    if (this.llmProvider.name !== 'none') {
-      // LLM path: include nearest-neighbor context in the prompt
-      const texts =
-        neighborData.length > 0
-          ? neighborData.map(n => n.text)
-          : ['[No neighbor context available]'];
-      markdown = await this.llmProvider.summarize(texts, {
-        neighborDistances: neighborData.map(n => n.distance),
-        conceptId: id,
-      });
-    } else {
-      // Non-LLM fallback: reconstruct from neighbor context
-      markdown = this.reconstructFromNeighbors(neighborData);
-    }
-
-    await conceptService.save({ id, markdown });
+  private async vectorToMarkdown(concept: ReadConcept): Promise<Derivation> {
+    this.requireLLM('vector -> markdown');
+    const neighbors = await this.neighborTexts(concept);
+    const texts =
+      neighbors.length > 0 ? neighbors.map(n => n.text) : ['[No neighbor context available]'];
+    const markdown = await this.llmProvider.summarize(texts, {
+      neighborScores: neighbors.map(n => n.score),
+      conceptId: concept.id,
+    });
+    return {
+      to: 'markdown',
+      value: markdown,
+      provenance: {
+        from: 'vector',
+        provider: this.llmProvider.name,
+        sources: neighbors.map(n => n.id),
+      },
+    };
   }
 
-  private async vectorToThoughtform(
-    id: string,
-    concept: { embedding?: number[] | null }
-  ): Promise<void> {
-    if (!concept.embedding) {
-      throw new Error(`Concept '${id}' has no vector representation.`);
-    }
-    const neighbors = await conceptService.search(concept.embedding, 5);
-    const neighborTexts: string[] = [];
-    for (const n of neighbors) {
-      if (n.id === id) continue;
-      const neighborConcept = await conceptService.read(n.id);
-      if (neighborConcept.markdown) neighborTexts.push(neighborConcept.markdown);
-      else if (neighborConcept.thoughtform)
-        neighborTexts.push((neighborConcept.thoughtform as ThoughtForm).rawText);
-    }
-
+  private async vectorToThoughtform(concept: ReadConcept): Promise<Derivation> {
+    this.requireLLM('vector -> thoughtform');
+    const neighbors = await this.neighborTexts(concept);
     const combinedText =
-      neighborTexts.length > 0 ? neighborTexts.join('\n\n') : '[No neighbor context available]';
+      neighbors.length > 0
+        ? neighbors.map(n => n.text).join('\n\n')
+        : '[No neighbor context available]';
     const extracted = await this.llmProvider.extractEntities(combinedText);
+    const thoughtform = this.buildThoughtForm(concept.id, combinedText, extracted);
+    return {
+      to: 'thoughtform',
+      value: thoughtform,
+      provenance: {
+        from: 'vector',
+        provider: this.llmProvider.name,
+        sources: neighbors.map(n => n.id),
+      },
+    };
+  }
+
+  /** Text of the concept's nearest neighbours, searched only within its own namespace. */
+  private async neighborTexts(
+    concept: ReadConcept
+  ): Promise<Array<{ id: string; text: string; score: number }>> {
+    const embedding = concept.embedding;
+    if (!embedding) {
+      throw new ConversionError(`Concept '${concept.id}' has no vector representation.`);
+    }
+    const namespace = concept.namespace ?? 'default';
+    const neighbors = await conceptService.search(embedding, NEIGHBOR_COUNT + 1, undefined, {
+      namespace,
+    });
+    const result: Array<{ id: string; text: string; score: number }> = [];
+    for (const n of neighbors) {
+      if (n.id === concept.id || result.length >= NEIGHBOR_COUNT) continue;
+      const neighbor = await conceptService.read(n.id, undefined, { namespace });
+      const tf = neighbor.thoughtform
+        ? StoredThoughtFormSchema.safeParse(neighbor.thoughtform)
+        : null;
+      const text = neighbor.markdown ?? (tf?.success ? thoughtFormText(tf.data) : null);
+      if (text) result.push({ id: n.id, text, score: n.score });
+    }
+    return result;
+  }
+
+  private buildThoughtForm(
+    id: string,
+    rawText: string,
+    extracted: ThoughtFormEntities
+  ): ThoughtForm {
     const now = new Date().toISOString();
     const thoughtform: ThoughtForm = {
       id,
-      rawText: combinedText,
+      rawText,
       language: 'en',
       metadata: {
         createdAt: now,
@@ -257,42 +304,39 @@ export class ConversionService {
       relationships: extracted.relationships,
       contextGraph: extracted.contextGraph,
     };
-    await conceptService.save({ id, thoughtform });
+    this.validateThoughtForm(thoughtform);
+    return thoughtform;
   }
 
-  /**
-   * Reconstruct markdown from nearest-neighbor texts without an LLM.
-   * Produces a coherent document by combining and attributing neighbor content.
-   */
-  private reconstructFromNeighbors(neighbors: Array<{ text: string; distance: number }>): string {
-    if (neighbors.length === 0) {
-      return '# Reconstructed Concept\n\nNo neighboring concepts available for reconstruction.';
+  private requireLLM(conversion: string): void {
+    if (this.llmProvider.name === 'none') {
+      throw new ConversionError(
+        `${conversion} requires an LLM provider; set POLYTICIAN_LLM_PROVIDER (none is configured)`
+      );
     }
+  }
 
-    const lines: string[] = [];
-    lines.push('# Reconstructed Concept');
-    lines.push('');
-    lines.push('*Reconstructed from nearest-neighbor context.*');
-    lines.push('');
-
-    // Sort by distance (closest first)
-    const sorted = [...neighbors].sort((a, b) => a.distance - b.distance);
-
-    if (sorted.length === 1) {
-      const first = sorted[0];
-      if (first) lines.push(first.text);
-    } else {
-      for (let i = 0; i < sorted.length; i++) {
-        const n = sorted[i];
-        if (!n) continue;
-        lines.push(`## Related Context ${i + 1}`);
-        lines.push('');
-        lines.push(n.text);
-        if (i < sorted.length - 1) lines.push('');
-      }
+  private requireMarkdown(concept: ReadConcept): string {
+    if (concept.markdown === undefined || concept.markdown === null) {
+      throw new ConversionError(
+        `Concept '${concept.id}' has no markdown representation. Available: check with read_concept.`
+      );
     }
+    return concept.markdown;
+  }
 
-    return lines.join('\n');
+  /** The stored thoughtform, re-validated: rows from 2.x may hold free-form JSON. */
+  private requireThoughtForm(concept: ReadConcept): StoredThoughtForm {
+    if (!concept.thoughtform) {
+      throw new ConversionError(`Concept '${concept.id}' has no thoughtform representation.`);
+    }
+    const parsed = StoredThoughtFormSchema.safeParse(concept.thoughtform);
+    if (!parsed.success) {
+      throw new ConversionError(
+        `Concept '${concept.id}' thoughtform matches neither the native nor the PolyVault v1 schema; re-save it with a valid thoughtform`
+      );
+    }
+    return parsed.data;
   }
 
   /**
@@ -308,7 +352,7 @@ export class ConversionService {
             `${issue.path.join('.')}: ${issue.message}`
         )
         .join('; ');
-      throw new Error(`ThoughtForm validation failed: ${issues}`);
+      throw new ConversionError(`ThoughtForm validation failed: ${issues}`);
     }
   }
 }

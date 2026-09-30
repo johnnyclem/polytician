@@ -16,6 +16,52 @@ export interface ConceptRow {
   markdown: string | null;
   thoughtform: string | null;
   embedding: Buffer | null;
+  /** JSON-encoded DerivedMap; rows written before 3.0 read back as '{}'. */
+  derived?: string;
+}
+
+/** Columns ConceptService may change on update. */
+export type ConceptUpdateFields = Partial<
+  Pick<
+    ConceptRow,
+    'version' | 'updated_at' | 'tags' | 'markdown' | 'thoughtform' | 'embedding' | 'derived'
+  >
+>;
+
+/**
+ * One write in an atomic batch. Every kind keeps the vector index in step
+ * with `concepts.embedding` inside the same transaction.
+ */
+export type ConceptWrite =
+  /** Insert a new row (and its vector); fails the batch if the id exists. */
+  | { kind: 'insert'; row: ConceptRow }
+  /**
+   * Update a row whose version is still `expectedVersion`; fails the batch
+   * otherwise. If `fields.embedding` is set, the vector is replaced (Buffer)
+   * or removed (null) in the concept's `namespace` partition.
+   */
+  | {
+      kind: 'update';
+      id: string;
+      namespace: string;
+      expectedVersion: number;
+      fields: ConceptUpdateFields;
+    }
+  /** Delete a row and its vector; fails the batch if no row matches (id, namespace?). */
+  | { kind: 'delete'; id: string; namespace?: string };
+
+/** `index` is the first write whose precondition failed; nothing was applied. */
+export type WriteOutcome = { ok: true } | { ok: false; index: number };
+
+/**
+ * Which concepts a vector search may return. Filters are applied inside the
+ * KNN query, so the top-k is the top-k of the matching rows.
+ */
+export interface VectorFilter {
+  /** Namespaces to search, or null for all namespaces. */
+  namespaces: readonly string[] | null;
+  /** Every tag must be present on the concept (exact match). */
+  tags?: readonly string[];
 }
 
 export interface ListRow {
@@ -32,6 +78,7 @@ export interface ListRow {
 
 export interface VectorResult {
   concept_id: string;
+  /** Cosine distance, 1 - cosine similarity, in [0, 2]. */
   distance: number;
 }
 
@@ -63,9 +110,17 @@ export interface DatabaseAdapter {
 
   findConcept(id: string): ConceptRow | null | Promise<ConceptRow | null>;
 
+  /**
+   * Apply writes atomically: all of them, or none if any precondition fails
+   * (outcome ok:false) or any statement throws (rethrown after rollback).
+   */
+  applyWrites(writes: ConceptWrite[]): WriteOutcome | Promise<WriteOutcome>;
+
+  /** Unconditional insert without a vector (PolyVault import path). */
   insertConcept(row: ConceptRow): void | Promise<void>;
 
-  updateConcept(id: string, fields: Record<string, unknown>): void | Promise<void>;
+  /** Unconditional update without vector sync (PolyVault import path). */
+  updateConcept(id: string, fields: ConceptUpdateFields): void | Promise<void>;
 
   deleteConcept(id: string): void | Promise<void>;
 
@@ -80,11 +135,16 @@ export interface DatabaseAdapter {
 
   // --- Vector operations ---
 
-  upsertVector(id: string, embedding: Buffer): void | Promise<void>;
+  upsertVector(id: string, namespace: string, embedding: Buffer): void | Promise<void>;
 
   deleteVector(id: string): void | Promise<void>;
 
-  vectorSearch(queryEmbedding: Buffer, k: number): VectorResult[] | Promise<VectorResult[]>;
+  /** k nearest rows by cosine distance among those matching `filter`, closest first. */
+  vectorSearch(
+    queryEmbedding: Buffer,
+    k: number,
+    filter: VectorFilter
+  ): VectorResult[] | Promise<VectorResult[]>;
 
   // --- Concept metadata (for search result enrichment) ---
 

@@ -5,7 +5,6 @@ import { createServer } from './server.js';
 import { initializeDatabaseAsync, closeDatabase } from './db/client.js';
 import { startHealthServer } from './health.js';
 import { logger } from './logger.js';
-import { indexSyncService } from './services/index-sync.service.js';
 import { conversionService } from './services/conversion.service.js';
 import { backupService } from './services/backup.service.js';
 import { getConfig, resetConfig } from './config.js';
@@ -50,11 +49,6 @@ async function main(): Promise<void> {
     logger.info('nlp pipeline set to rule-based');
   }
 
-  // Start async index synchronisation if enabled
-  if (config.distributed.asyncIndexSync) {
-    indexSyncService.start();
-  }
-
   // Start AgentVault event bridge if configured
   let avBridge: AgentVaultEventBridge | null = null;
   if (config.agentVault && (config.agentVault.sync.enabled || config.agentVault.archival.enabled)) {
@@ -86,11 +80,9 @@ async function main(): Promise<void> {
     logger.info('shutdown initiated');
     backupService.stop();
     avBridge?.stop();
-    indexSyncService.stop();
     healthServer.close();
     try {
-      // Drain queued vector-index updates, then close the DB (async for Postgres).
-      await indexSyncService.waitForPending();
+      // Close the DB (async for Postgres).
       await closeDatabase();
     } catch (err) {
       logger.error('shutdown cleanup failed', err);

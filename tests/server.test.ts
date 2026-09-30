@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { vi } from 'vitest';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
@@ -26,6 +26,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../src/server.js';
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
+import { resetConfig } from '../src/config.js';
 import type { ThoughtForm } from '../src/types/thoughtform.js';
 
 let client: Client;
@@ -369,7 +370,14 @@ describe('MCP Server — Tool integration', () => {
     }
   });
 
-  it('should allow cross-namespace search via MCP', async () => {
+  it('should allow cross-namespace search via MCP when the operator enables it', async () => {
+    process.env['POLYTICIAN_NAMESPACES'] = '*';
+    resetConfig();
+    onTestFinished(() => {
+      delete process.env['POLYTICIAN_NAMESPACES'];
+      resetConfig();
+    });
+
     const savedA = await callTool('save_concept', {
       namespace: 'agent-a',
       markdown: '# Cross namespace test A',

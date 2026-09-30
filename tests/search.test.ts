@@ -36,7 +36,7 @@ describe('ConceptService search', () => {
     const query = makeEmbedding(10);
     const results = await service.search(query, 5);
     expect(results).toHaveLength(1);
-    expect(results[0]!.distance).toBeCloseTo(0, 1);
+    expect(results[0]!.score).toBeCloseTo(1, 5);
     expect(results[0]!.tags).toContain('test');
     expect(results[0]!.representations.markdown).toBe(true);
     expect(results[0]!.representations.vector).toBe(true);
@@ -54,7 +54,7 @@ describe('ConceptService search', () => {
     expect(results).toHaveLength(2);
     expect(results[0]!.id).toBe(savedSimilar.id);
     expect(results[1]!.id).toBe(savedDifferent.id);
-    expect(results[0]!.distance).toBeLessThan(results[1]!.distance);
+    expect(results[0]!.score).toBeGreaterThan(results[1]!.score);
   });
 
   it('should respect k limit', async () => {
@@ -98,7 +98,7 @@ describe('ConceptService search', () => {
     // Should find it near 300, not near 0
     const resultsNear300 = await service.search(makeEmbedding(300), 5);
     const resultsNear0 = await service.search(makeEmbedding(0), 5);
-    expect(resultsNear300[0]!.distance).toBeLessThan(resultsNear0[0]!.distance);
+    expect(resultsNear300[0]!.score).toBeGreaterThan(resultsNear0[0]!.score);
   });
 
   it('should remove vector from index on concept delete', async () => {

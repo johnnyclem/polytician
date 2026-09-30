@@ -23,7 +23,9 @@ vi.mock('@xenova/transformers', () => {
 
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
 import { ConceptService } from '../src/services/concept.service.js';
-const { EmbeddingService } = await import('../src/services/embedding.service.js');
+import { getAdapter } from '../src/db/client.js';
+import { ValidationError, VersionConflictError } from '../src/errors/index.js';
+const { EmbeddingService, embeddingService } = await import('../src/services/embedding.service.js');
 
 // Helper: create a simple normalized embedding vector with a dominant dimension
 function makeEmbedding(dominantIndex: number): number[] {
@@ -35,22 +37,23 @@ function makeEmbedding(dominantIndex: number): number[] {
 
 describe('Batch embedding ingestion', () => {
   let conceptService: ConceptService;
-  let embeddingService: InstanceType<typeof EmbeddingService>;
+  let localEmbeddingService: InstanceType<typeof EmbeddingService>;
 
   beforeEach(() => {
     setupTestDb();
     conceptService = new ConceptService();
-    embeddingService = new EmbeddingService();
+    localEmbeddingService = new EmbeddingService();
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     teardownTestDb();
   });
 
   describe('EmbeddingService.embedBatch', () => {
     it('should generate embeddings for multiple texts', async () => {
       const texts = ['hello world', 'quantum physics', 'machine learning'];
-      const embeddings = await embeddingService.embedBatch(texts);
+      const embeddings = await localEmbeddingService.embedBatch(texts);
 
       expect(embeddings).toHaveLength(3);
       for (const emb of embeddings) {
@@ -60,8 +63,8 @@ describe('Batch embedding ingestion', () => {
 
     it('should produce same results as individual embed calls', async () => {
       const texts = ['alpha', 'beta', 'gamma'];
-      const batchResults = await embeddingService.embedBatch(texts);
-      const individualResults = await Promise.all(texts.map(t => embeddingService.embed(t)));
+      const batchResults = await localEmbeddingService.embedBatch(texts);
+      const individualResults = await Promise.all(texts.map(t => localEmbeddingService.embed(t)));
 
       for (let i = 0; i < texts.length; i++) {
         expect(batchResults[i]).toEqual(individualResults[i]);
@@ -69,13 +72,13 @@ describe('Batch embedding ingestion', () => {
     });
 
     it('should handle empty input', async () => {
-      const results = await embeddingService.embedBatch([]);
+      const results = await localEmbeddingService.embedBatch([]);
       expect(results).toEqual([]);
     });
 
     it('should respect batch size parameter', async () => {
       const texts = Array.from({ length: 10 }, (_, i) => `text ${i}`);
-      const results = await embeddingService.embedBatch(texts, 3);
+      const results = await localEmbeddingService.embedBatch(texts, 3);
       expect(results).toHaveLength(10);
     });
   });
@@ -167,35 +170,63 @@ describe('Batch embedding ingestion', () => {
       expect(result.saved[0]!.tags).toContain('updated');
     });
 
-    it('should improve throughput relative to sequential insertion', async () => {
-      const count = 60;
-      const entries = Array.from({ length: count }, (_, i) => ({
-        markdown: `# Throughput test ${i}`,
-        embedding: makeEmbedding(i),
-        tags: ['throughput'],
-      }));
+    it('is atomic: one invalid entry means nothing in the batch is persisted', async () => {
+      const entries = [
+        { markdown: '# ok 1', tags: ['atomic'] },
+        { markdown: '# ok 2', embedding: makeEmbedding(2), tags: ['atomic'] },
+        { markdown: '# bad', embedding: [1, 2, 3], tags: ['atomic'] },
+        { markdown: '# ok 4', tags: ['atomic'] },
+      ];
 
-      // Sequential timing
-      setupTestDb(); // Reset DB for fair comparison
-      const seqStart = performance.now();
-      for (const entry of entries) {
-        await conceptService.save(entry);
-      }
-      const seqDuration = performance.now() - seqStart;
+      await expect(conceptService.saveBatch(entries)).rejects.toThrow(ValidationError);
+      expect((await conceptService.list({ tags: ['atomic'] })).total).toBe(0);
+    });
 
-      // Reset for batch test
-      teardownTestDb();
-      setupTestDb();
-      conceptService = new ConceptService();
+    it('rolls back earlier entries when a later write fails inside the transaction', async () => {
+      const id = 'bbbbbbbb-bbbb-4bbb-abbb-bbbbbbbbbbbb';
+      await conceptService.save({ id, markdown: '# v1' });
+      await conceptService.save({ id, markdown: '# v2' });
 
-      // Batch timing
-      const batchStart = performance.now();
-      await conceptService.saveBatch(entries, { batchSize: 50 });
-      const batchDuration = performance.now() - batchStart;
+      await expect(
+        conceptService.saveBatch([
+          { markdown: '# new', tags: ['rollback'] },
+          { id, expectedVersion: 1, markdown: '# stale' },
+        ])
+      ).rejects.toThrow(VersionConflictError);
 
-      // Batch should be within reasonable range of sequential
-      // (adapter-based implementation may not be faster than sequential in all cases)
-      expect(batchDuration).toBeLessThan(seqDuration * 1.5);
+      expect((await conceptService.list({ tags: ['rollback'] })).total).toBe(0);
+      expect((await conceptService.read(id)).markdown).toBe('# v2');
+    });
+
+    it('writes the whole batch through a single adapter transaction', async () => {
+      const spy = vi.spyOn(getAdapter(), 'applyWrites');
+      await conceptService.saveBatch(
+        Array.from({ length: 10 }, (_, i) => ({ markdown: `# tx ${i}`, embedding: makeEmbedding(i) }))
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]![0]).toHaveLength(10);
+    });
+
+    it('embeds each entry that needs a vector exactly once', async () => {
+      const embedBatch = vi.spyOn(embeddingService, 'embedBatch');
+      const embed = vi.spyOn(embeddingService, 'embed');
+      const entries = [
+        { markdown: '# needs embedding 1' },
+        { markdown: '# has its own', embedding: makeEmbedding(7) },
+        { markdown: '# needs embedding 2' },
+      ];
+
+      const result = await conceptService.saveBatch(entries, { autoEmbed: true });
+
+      expect(embedBatch).toHaveBeenCalledTimes(1);
+      expect(embedBatch.mock.calls[0]![0]).toEqual(['# needs embedding 1', '# needs embedding 2']);
+      expect(embed.mock.calls.map(c => c[0])).toEqual([
+        '# needs embedding 1',
+        '# needs embedding 2',
+      ]);
+      expect(result.saved.every(c => c.embedding?.length === VECTOR_DIMENSION)).toBe(true);
+      expect(result.saved[1]!.derived).toEqual({});
+      expect(result.saved[0]!.derived).toEqual({ vector: { from: 'markdown' } });
     });
   });
 });

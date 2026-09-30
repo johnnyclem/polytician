@@ -8,8 +8,15 @@ import { ArweaveUploadClient } from '../client/arweave-client.js';
 import { SecretClient } from '../client/secret-client.js';
 import { conceptService } from '../../../services/concept.service.js';
 import { embeddingService } from '../../../services/embedding.service.js';
-import { getAdapter } from '../../../db/client.js';
-import type { ThoughtForm } from '../../../types/thoughtform.js';
+import { resolveNamespace } from '../../../services/namespace-policy.js';
+import { NamespaceSchema, TagsSchema } from '../../../types/concept.js';
+import type { StoredThoughtForm } from '../../../types/thoughtform.js';
+import { LIMITS } from '../../../types/limits.js';
+import { errorPayload } from '../../../mcp/tool-result.js';
+
+const namespaceArg = NamespaceSchema.optional().describe(
+  'Namespace the concept lives in (default: "default")'
+);
 
 /**
  * Shape of a serialized concept inside a vault bundle.
@@ -73,23 +80,15 @@ function deserializeBundle(raw: unknown): VaultBundle {
   };
 }
 
-/**
- * Rebuild the vector index for a set of concept IDs by re-upserting their
- * embeddings into the adapter's vector table.
- */
-async function rebuildVectorIndex(conceptIds: string[]): Promise<number> {
-  const adapter = getAdapter();
-  let rebuilt = 0;
-
-  for (const id of conceptIds) {
-    const row = await adapter.findConcept(id);
-    if (row?.embedding) {
-      await adapter.upsertVector(id, row.embedding);
-      rebuilt++;
-    }
-  }
-
-  return rebuilt;
+/** Error result carrying the error's stable code, when it has one. */
+function toolError(err: unknown): {
+  isError: true;
+  content: Array<{ type: 'text'; text: string }>;
+} {
+  return {
+    isError: true,
+    content: [{ type: 'text' as const, text: JSON.stringify(errorPayload(err)) }],
+  };
 }
 
 export function registerVaultTools(server: McpServer, config: AgentVaultConfig): void {
@@ -100,22 +99,38 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
 
   // --- vault_infer ---
 
-  server.tool(
+  server.registerTool(
     'vault_infer',
-    "Run a prompt through AgentVault's inference fallback chain (Bittensor -> Venice AI -> local) and optionally save the result as a concept.",
     {
-      prompt: z.string().min(1).describe('Prompt text to send to the inference chain'),
-      systemPrompt: z.string().optional().describe('Optional system prompt'),
-      maxTokens: z.number().int().positive().optional(),
-      temperature: z.number().min(0).max(2).optional(),
-      saveAsConceptNamespace: z
-        .string()
-        .optional()
-        .describe('If set, save the inference result as a markdown concept in this namespace'),
-      tags: z.array(z.string()).optional(),
+      description:
+        "Run a prompt through AgentVault's inference fallback chain (Bittensor -> Venice AI -> local) and optionally save the result as a concept.",
+      inputSchema: z
+        .object({
+          prompt: z
+            .string()
+            .min(1)
+            .max(LIMITS.markdownChars)
+            .describe('Prompt text to send to the inference chain'),
+          systemPrompt: z
+            .string()
+            .max(LIMITS.markdownChars)
+            .optional()
+            .describe('Optional system prompt'),
+          maxTokens: z.number().int().positive().optional(),
+          temperature: z.number().min(0).max(2).optional(),
+          saveAsConceptNamespace: NamespaceSchema.optional().describe(
+            'If set, save the inference result as a markdown concept in this namespace'
+          ),
+          tags: TagsSchema.optional(),
+        })
+        .strict(),
     },
     async ({ prompt, systemPrompt, maxTokens, temperature, saveAsConceptNamespace, tags }) => {
       try {
+        const saveNamespace =
+          saveAsConceptNamespace !== undefined
+            ? resolveNamespace(saveAsConceptNamespace)
+            : undefined;
         const res = await inferClient.infer({
           prompt,
           systemPrompt,
@@ -125,10 +140,10 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
         });
 
         let savedConceptId: string | undefined;
-        if (saveAsConceptNamespace) {
+        if (saveNamespace) {
           const embedding = await embeddingService.embed(res.text).catch(() => undefined);
           const concept = await conceptService.save({
-            namespace: saveAsConceptNamespace,
+            namespace: saveNamespace,
             markdown: res.text,
             embedding,
             tags: tags ?? [],
@@ -150,25 +165,29 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           ],
         };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
+        return toolError(err);
       }
     }
   );
 
   // --- vault_memory_push ---
 
-  server.tool(
+  server.registerTool(
     'vault_memory_push',
-    "Push a Polytician concept to AgentVault's memory_repo canister immediately.",
     {
-      conceptId: z.string().uuid().describe('Concept UUID to push'),
+      description: "Push a Polytician concept to AgentVault's memory_repo canister immediately.",
+      inputSchema: z
+        .object({
+          conceptId: z.string().uuid().describe('Concept UUID to push'),
+          namespace: namespaceArg,
+        })
+        .strict(),
     },
-    async ({ conceptId }) => {
+    async ({ conceptId, namespace }) => {
       try {
-        const concept = await conceptService.read(conceptId);
+        const concept = await conceptService.read(conceptId, undefined, {
+          namespace: resolveNamespace(namespace),
+        });
         const entries = [];
         if (concept.markdown) {
           entries.push({
@@ -195,32 +214,43 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           ],
         };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
+        return toolError(err);
       }
     }
   );
 
   // --- vault_memory_pull ---
 
-  server.tool(
+  server.registerTool(
     'vault_memory_pull',
-    "Pull all entries from AgentVault's memory_repo branch into Polytician concepts.",
-    {},
-    async () => {
+    {
+      description:
+        "Pull all entries from AgentVault's memory_repo branch into Polytician concepts in one namespace. Entries whose concept lives in another namespace are skipped.",
+      inputSchema: z.object({ namespace: namespaceArg }).strict(),
+    },
+    async ({ namespace }) => {
       try {
+        const ns = resolveNamespace(namespace);
         const branch = await memClient.getBranchState();
         let imported = 0;
+        const skipped: Array<{ id: string; error: string }> = [];
         const mdEntries = branch.entries.filter(
           e => e.key.startsWith('concepts/') && e.key.endsWith('/markdown')
         );
         for (const entry of mdEntries) {
           const cid = entry.key.split('/')[1];
           if (!cid) continue;
-          await conceptService.save({ id: cid, markdown: entry.data, tags: entry.tags });
-          imported++;
+          try {
+            await conceptService.save({
+              id: cid,
+              namespace: ns,
+              markdown: entry.data,
+              tags: entry.tags,
+            });
+            imported++;
+          } catch (err) {
+            skipped.push({ id: cid, error: String(errorPayload(err).error) });
+          }
         }
         return {
           content: [
@@ -231,30 +261,36 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
                 branch: branch.branch,
                 headSha: branch.headSha,
                 imported,
+                skipped: skipped.length > 0 ? skipped : undefined,
               }),
             },
           ],
         };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
+        return toolError(err);
       }
     }
   );
 
   // --- vault_archive_concept ---
 
-  server.tool(
+  server.registerTool(
     'vault_archive_concept',
-    'Archive a concept to Arweave permanently via AgentVault. Returns the Arweave transaction ID and URL.',
     {
-      conceptId: z.string().uuid().describe('Concept UUID to archive'),
+      description:
+        'Archive a concept to Arweave permanently via AgentVault. Returns the Arweave transaction ID and URL.',
+      inputSchema: z
+        .object({
+          conceptId: z.string().uuid().describe('Concept UUID to archive'),
+          namespace: namespaceArg,
+        })
+        .strict(),
     },
-    async ({ conceptId }) => {
+    async ({ conceptId, namespace }) => {
       try {
-        const concept = await conceptService.read(conceptId);
+        const concept = await conceptService.read(conceptId, undefined, {
+          namespace: resolveNamespace(namespace),
+        });
         const content = concept.markdown ?? JSON.stringify(concept.thoughtform);
         if (!content) {
           return {
@@ -292,21 +328,23 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           ],
         };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
+        return toolError(err);
       }
     }
   );
 
   // --- vault_get_secret ---
 
-  server.tool(
+  server.registerTool(
     'vault_get_secret',
-    "Retrieve a named secret from AgentVault's secret provider. Returns metadata only, never the raw value.",
     {
-      name: z.string().min(1).describe('Secret name in AgentVault'),
+      description:
+        "Retrieve a named secret from AgentVault's secret provider. Returns metadata only, never the raw value.",
+      inputSchema: z
+        .object({
+          name: z.string().min(1).max(256).describe('Secret name in AgentVault'),
+        })
+        .strict(),
     },
     async ({ name }) => {
       try {
@@ -325,20 +363,20 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           ],
         };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
+        return toolError(err);
       }
     }
   );
 
   // --- vault_memory_repo_log ---
 
-  server.tool(
+  server.registerTool(
     'vault_memory_repo_log',
-    'Read the current state of the AgentVault memory_repo branch for this Polytician namespace.',
-    {},
+    {
+      description:
+        'Read the current state of the AgentVault memory_repo branch for this Polytician namespace.',
+      inputSchema: z.object({}).strict(),
+    },
     async () => {
       try {
         const branch = await memClient.getBranchState();
@@ -358,28 +396,32 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           ],
         };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
+        return toolError(err);
       }
     }
   );
 
   // --- vault_restore ---
 
-  server.tool(
+  server.registerTool(
     'vault_restore',
-    'Restore concepts and vector index from a vault bundle. Accepts either inline bundle JSON or a file path to a bundle. Deserializes all concepts, saves them, and rebuilds the FAISS vector index.',
     {
-      bundle: z
-        .any()
-        .optional()
-        .describe('Inline bundle JSON object containing { version, exportedAt, concepts: [...] }'),
-      path: z
-        .string()
-        .optional()
-        .describe('File path to a JSON bundle file. Mutually exclusive with "bundle".'),
+      description:
+        'Restore concepts from a vault bundle. Accepts either inline bundle JSON or a file path to a bundle. Each concept is validated and saved (row and vector together) into its bundle namespace; concepts whose namespace is not allowed, or whose id already lives in another namespace, are reported as errors.',
+      inputSchema: z
+        .object({
+          bundle: z
+            .union([z.string(), z.record(z.unknown())])
+            .optional()
+            .describe(
+              'Inline bundle JSON object (or JSON string) containing { version, exportedAt, concepts: [...] }'
+            ),
+          path: z
+            .string()
+            .optional()
+            .describe('File path to a JSON bundle file. Mutually exclusive with "bundle".'),
+        })
+        .strict(),
     },
     async ({ bundle, path }) => {
       try {
@@ -425,26 +467,29 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
 
         // Restore concepts
         const restoredIds: string[] = [];
+        let vectorsRebuilt = 0;
         const errors: Array<{ id: string; error: string }> = [];
 
         for (const entry of parsed.concepts) {
           try {
-            await conceptService.save({
+            // Each save validates the entry and writes the row and its vector
+            // in one transaction; an existing id in another namespace is refused.
+            const saved = await conceptService.save({
               id: entry.id,
-              namespace: entry.namespace,
+              namespace: resolveNamespace(entry.namespace),
               markdown: entry.markdown ?? undefined,
-              thoughtform: entry.thoughtform ? (entry.thoughtform as ThoughtForm) : undefined,
+              thoughtform: entry.thoughtform
+                ? (entry.thoughtform as unknown as StoredThoughtForm)
+                : undefined,
               embedding: entry.embedding ?? undefined,
               tags: entry.tags,
             });
             restoredIds.push(entry.id);
+            if (saved.embedding) vectorsRebuilt++;
           } catch (err) {
-            errors.push({ id: entry.id, error: String(err) });
+            errors.push({ id: entry.id, error: String(errorPayload(err).error) });
           }
         }
-
-        // Rebuild vector index for restored concepts
-        const vectorsRebuilt = await rebuildVectorIndex(restoredIds);
 
         return {
           content: [
@@ -462,10 +507,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
           ],
         };
       } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
+        return toolError(err);
       }
     }
   );

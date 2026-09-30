@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
 import { ConceptService } from '../src/services/concept.service.js';
 import { conceptEventBus } from '../src/events/concept-events.js';
-import { IndexSyncService } from '../src/services/index-sync.service.js';
 import { getAdapter } from '../src/db/client.js';
 
 let service: ConceptService;
@@ -90,102 +89,52 @@ describe('Concept event emission', () => {
   });
 });
 
-describe('IndexSyncService – async vector index synchronisation', () => {
-  let syncService: IndexSyncService;
-
+describe('Vector index consistency (replaces the 2.x async IndexSyncService)', () => {
   beforeEach(() => {
     setupTestDb();
     service = new ConceptService();
-    syncService = new IndexSyncService();
-    syncService.start();
   });
 
   afterEach(() => {
-    syncService.stop();
     teardownTestDb();
   });
 
-  it('queues a vector sync update when concept.created is emitted with an embedding', async () => {
-    const embedding = Array.from({ length: 384 }, () => 0.5);
+  it('indexes the vector in the same write as the row, with no async sync step', async () => {
+    const embedding = Array.from({ length: 384 }, (_, i) => (i === 3 ? 1 : 0.01));
+    const saved = await service.save({ embedding });
 
-    conceptEventBus.emit('concept.created', {
-      conceptId: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
-      embedding,
-      timestamp: Date.now(),
-    });
-
-    expect(syncService.pendingCount).toBeGreaterThanOrEqual(0); // may have already flushed
-    await syncService.waitForPending();
-    expect(syncService.pendingCount).toBe(0);
-  });
-
-  it('processes vector upsert asynchronously and the row appears in concept_vectors', async () => {
-    const id = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb';
-
-    // First insert a concept row so the foreign-key constraint is satisfied
-    // (concept_vectors is a virtual table without FK enforcement in sqlite-vec,
-    //  so we can safely insert the vector directly for this isolation test).
-    const embedding = Array.from({ length: 384 }, () => 0.2);
-
-    conceptEventBus.emit('concept.created', { conceptId: id, embedding, timestamp: Date.now() });
-
-    await syncService.waitForPending();
-
-    const adapter = getAdapter();
-    const results = await adapter.vectorSearch(
-      Buffer.from(new Float32Array(Array.from({ length: 384 }, () => 0.2)).buffer),
-      10
+    const results = await getAdapter().vectorSearch(
+      Buffer.from(new Float32Array(embedding).buffer),
+      1,
+      { namespaces: null }
     );
-    const found = results.find(r => r.concept_id === id);
-    expect(found).toBeDefined();
+    expect(results.map(r => r.concept_id)).toEqual([saved.id]);
   });
 
-  it('removes the vector row asynchronously on concept.deleted', async () => {
-    const id = 'cccccccc-cccc-4ccc-cccc-cccccccccccc';
-    const embedding = Array.from({ length: 384 }, () => 0.3);
+  it('removes the vector together with the row on delete', async () => {
+    const embedding = Array.from({ length: 384 }, (_, i) => (i === 4 ? 1 : 0.01));
+    const saved = await service.save({ embedding });
+    await service.delete(saved.id);
 
-    // Insert via event
-    conceptEventBus.emit('concept.created', { conceptId: id, embedding, timestamp: Date.now() });
-    await syncService.waitForPending();
-
-    // Delete via event
-    conceptEventBus.emit('concept.deleted', { conceptId: id, timestamp: Date.now() });
-    await syncService.waitForPending();
-
-    const adapter = getAdapter();
-    const results = await adapter.vectorSearch(
-      Buffer.from(new Float32Array(Array.from({ length: 384 }, () => 0.3)).buffer),
-      10
+    const results = await getAdapter().vectorSearch(
+      Buffer.from(new Float32Array(embedding).buffer),
+      10,
+      { namespaces: null }
     );
-    const found = results.find(r => r.concept_id === id);
-    expect(found).toBeUndefined();
+    expect(results).toEqual([]);
   });
 
-  it('handles concept.created without embedding without error', async () => {
-    conceptEventBus.emit('concept.created', {
-      conceptId: 'dddddddd-dddd-4ddd-dddd-dddddddddddd',
-      embedding: null,
-      timestamp: Date.now(),
-    });
-
-    await syncService.waitForPending();
-    // No error = pass
-    expect(syncService.pendingCount).toBe(0);
-  });
-
-  it('stops processing events after stop() is called', async () => {
-    syncService.stop();
-
-    const spy = vi.spyOn(syncService as unknown as { syncVector: () => void }, 'syncVector');
-
-    conceptEventBus.emit('concept.created', {
-      conceptId: 'eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee',
-      embedding: Array.from({ length: 384 }, () => 0.1),
-      timestamp: Date.now(),
-    });
-
-    await new Promise(r => setImmediate(r));
-    expect(spy).not.toHaveBeenCalled();
+  it('emits no events for a batch that was rolled back', async () => {
+    const created = vi.fn();
+    conceptEventBus.on('concept.created', created);
+    try {
+      await expect(
+        service.saveBatch([{ markdown: '# ok' }, { markdown: '# bad', embedding: [1, 2, 3] }])
+      ).rejects.toThrow();
+    } finally {
+      conceptEventBus.off('concept.created', created);
+    }
+    expect(created).not.toHaveBeenCalled();
   });
 });
 

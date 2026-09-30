@@ -14,9 +14,9 @@ Everything runs on your machine. Embeddings are generated in-process; there's no
 ## Why Polytician
 
 - 🧠 **One concept, three shapes** — save once, read back as a vector, markdown, or structured JSON, and convert between them on demand via a single `convert_concept` tool
-- 🔍 **Semantic search** — cosine similarity search over `sqlite-vec` (default) or Postgres/`pgvector`, scoped to a namespace by default with explicit opt-in for cross-namespace queries
+- 🔍 **Semantic search** — cosine similarity search over `sqlite-vec` (default) or Postgres/`pgvector`. Namespace and tag filters run inside the vector query, so a filtered top-k is the top-k of the matching concepts. Saved text is embedded automatically, so `save_concept` → `search_concepts` works without a manual conversion
 - 🔒 **Local-first embeddings** — `@xenova/transformers` runs `all-MiniLM-L6-v2` in-process (384 dimensions); no network round-trip, no API key required
-- 🗂️ **Namespaces + optimistic concurrency** — isolate concepts per agent/tenant and guard concurrent writes with an `expectedVersion` check
+- 🗂️ **Namespaces + optimistic concurrency** — every tool call is scoped to a namespace, and an operator allowlist (`POLYTICIAN_NAMESPACES`) limits which ones a server serves (see [Namespaces](#namespaces) for exactly what that does and does not isolate). `expectedVersion` is checked in the same statement that writes, so of two concurrent writers holding the same version exactly one succeeds
 - 🔌 **Pluggable LLM + NLP** — bring your own provider (Anthropic, OpenAI, MCP sampling, or [AgentVault](#agentvault-integration)) for the conversions that need one (`markdown→thoughtform`, `vector→markdown`, `vector→thoughtform`)
 - 🧳 **Portable backups** — snapshot and restore your entire memory as a single signed JSON bundle (optionally AES-256-GCM encrypted), with an optional Arweave archival path via AgentVault
 - 🚀 **Deploys anywhere** — a single Node process (SQLite by default), with first-class Docker Compose and Kubernetes manifests for a distributed, Postgres-backed, multi-node setup
@@ -148,8 +148,8 @@ Polytician is configured entirely through environment variables (or a `.polytici
 | `POLYTICIAN_LLM_PROVIDER` | `none` | `anthropic`, `openai`, `sampling`, `agentvault`, or `none` — required for LLM-assisted conversions |
 | `POLYTICIAN_LLM_MODEL` / `POLYTICIAN_LLM_API_KEY` | — | Provider-specific model name / key |
 | `POLYTICIAN_NLP_PIPELINE` | `none` | `rule-based`, `llm`, or `none` — used by `markdown→thoughtform` |
+| `POLYTICIAN_NAMESPACES` | unset | Namespaces tool calls may address: a comma-separated list, or `*` for any. Unset allows any namespace but refuses `crossNamespace` search. See [Namespaces](#namespaces) |
 | `POLYTICIAN_NODE_ID` | random | Identifies this node in a distributed/multi-node deployment |
-| `POLYTICIAN_ASYNC_INDEX_SYNC` | `false` | Enable background vector-index sync across nodes |
 | `POLYTICIAN_ENCRYPT` | `false` | Encrypt PolyVault backup bundles (AES-256-GCM) — see [Backup, Restore & Encryption](#backup-restore--encryption) |
 | `POLYTICIAN_BACKUP_THRESHOLD` | `50` | Auto-trigger a backup after this many saves (`0` disables) |
 | `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` | — | Enable the [AgentVault integration](#agentvault-integration) and its `vault_*` tools |
@@ -160,9 +160,13 @@ Polytician is configured entirely through environment variables (or a `.polytici
 
 All tools return `{ "content": [{ "type": "text", "text": "<JSON>" }] }`; the examples below show the decoded JSON payload for brevity. Authoritative schemas live in `src/server.ts`.
 
+Every tool's input schema is strict: an unknown argument is a validation error, not silently dropped. Every tool that takes a `namespace` defaults it to `"default"`. Errors from the service come back with `isError: true` and a JSON body `{ "error", "code" }`, where `code` is one of `NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT` (plus `currentVersion`), `NAMESPACE_DENIED`, `OVERWRITE_REFUSED` or `CONVERSION_ERROR`.
+
+Input caps: markdown ≤ 1,000,000 characters, thoughtform ≤ 2,000,000 characters of JSON, ≤ 64 tags of ≤ 128 characters, ≤ 500 concepts per batch, query/`embed_text` text ≤ 100,000 characters. Namespaces match `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`. Embeddings must have exactly 384 finite components and must not be all zero.
+
 ### `save_concept`
 
-Create or update a concept with one or more representations. Tags merge on update; namespace defaults to `"default"`.
+Create or update a concept. A new concept needs at least one representation (`markdown`, `thoughtform` or `embedding`). Tags merge on update.
 
 ```json
 // Request
@@ -171,45 +175,58 @@ Create or update a concept with one or more representations. Tags merge on updat
   "tags": ["physics", "history"]
 }
 // Response
-{ "id": "...", "namespace": "default", "version": 1, "tags": ["physics", "history"], ... }
+{ "id": "...", "namespace": "default", "version": 1, "tags": ["physics", "history"], "derived": { "vector": { "from": "markdown" } }, ... }
 ```
 
-Pass `expectedVersion` to guard against concurrent writes — a mismatch throws `VERSION_CONFLICT` with the current version attached.
+- **Auto-embedding** (`autoEmbed`, default `true`): when no `embedding` is passed, the vector is computed from the markdown written (or, for a thoughtform-only concept, its `rawText`), so the concept is immediately searchable. It never replaces a vector you supplied yourself; pass `autoEmbed: false` to skip it.
+- **Concurrency**: pass `expectedVersion` and the write applies only if the stored version still matches, checked in the same `UPDATE` that writes. Otherwise it fails with `VERSION_CONFLICT` and `currentVersion`. Writes without `expectedVersion` never lose a concurrent writer's changes either: the tag merge is re-applied on top of the newer version.
+- **Namespaces**: an update must name the namespace the concept lives in (`NAMESPACE_DENIED` otherwise). Concepts cannot move between namespaces.
+- **Atomicity**: the concept row and its vector are written in one transaction.
+- **`thoughtform`** must be either the native shape (`rawText`, ISO-timestamp `metadata`, `entities` with `text`/`type`/`confidence`/`offset`) or a PolyVault v1 ThoughtForm (`schemaVersion`, epoch-ms `metadata`, `entities` with `value`). Free-form JSON is rejected.
 
 ### `read_concept`
 
-`{ "id": "...", "representations"?: ["vector"|"markdown"|"thoughtform"] }` → the concept, optionally filtered to the requested representations.
+`{ "id": "...", "namespace"?, "representations"?: ["vector"|"markdown"|"thoughtform"] }` → the concept, optionally filtered to the requested representations. `derived` lists the representations that were derived rather than written by a caller, with their provenance (`from`, and `provider`/`sources` for LLM conversions). A concept in another namespace is `NOT_FOUND`.
 
 ### `delete_concept`
 
-`{ "id": "..." }` → `{ "deleted": "..." }`
+`{ "id": "...", "namespace"? }` → `{ "deleted": "..." }`. Deletes the row and its vector together; a concept in another namespace is `NOT_FOUND`.
 
 ### `list_concepts`
 
-`{ "namespace"?, "limit"? (≤100, default 50), "offset"?, "tags"? }` → paginated concepts scoped to the namespace.
+`{ "namespace"?, "limit"? (≤100, default 50), "offset"?, "tags"? }` → paginated concepts in the namespace carrying every listed tag (exact match), with a `representations` flag per concept (`vector: false` means it is not searchable).
 
 ### `batch_save_concepts`
 
-`{ "concepts": [{ "id"?, "markdown"?, "thoughtform"?, "embedding"?, "tags"? }, ...], "autoEmbed"?, "batchSize"? }` → `{ "count", "ids": [...] }`. When `autoEmbed` is true, any entry with markdown but no embedding is embedded in batches of `batchSize` (default 50).
+`{ "concepts": [{ "id"?, "expectedVersion"?, "markdown"?, "thoughtform"?, "embedding"?, "tags"? }, ...], "namespace"?, "autoEmbed"?, "batchSize"? }` → `{ "count", "ids": [...] }`. The batch is atomic: every entry is validated (and embedded, once, in batches of `batchSize`, default 50) before anything is written, and then all entries are written in one transaction or none are. `autoEmbed` defaults to `true`, as in `save_concept`.
 
 ### `search_concepts`
 
-Semantic similarity search — provide `query` (auto-embedded) or a raw `vector`.
+Semantic similarity search. Provide exactly one of `query` (auto-embedded) or a raw `vector`.
 
 ```json
-{ "query": "famous physicists", "k": 5, "namespace": "default" }
+// Request
+{ "query": "famous physicists", "k": 5, "namespace": "default", "tags"?: ["history"] }
+// Response
+[{ "id": "...", "namespace": "default", "score": 0.83, "tags": ["physics", "history"], "representations": { ... } }]
 ```
 
-Results are namespace-scoped by default; pass `crossNamespace: true` to search globally.
+- `score` is `(1 + cosine similarity) / 2`, in `[0, 1]` (1 = same direction as the query, 0.5 = orthogonal). Results are ordered by score, and equal scores by id.
+- The namespace and `tags` (every tag, exact match) filters run inside the vector query. With sqlite-vec the namespace is the vec0 partition key and tags restrict the candidate ids. With pgvector they are SQL `WHERE` clauses on an HNSW iterative scan (pgvector ≥ 0.8) or an exact scan (older pgvector). So the top-k is the top-k of the matching concepts, not a filtered global top-k.
+- On sqlite-vec the search is exact (brute-force KNN). On pgvector it is an HNSW approximate search, so recall is high but not guaranteed.
+- `crossNamespace: true` searches every namespace in `POLYTICIAN_NAMESPACES` (all of them if it is `*`). It fails with `NAMESPACE_DENIED` when the operator has not set `POLYTICIAN_NAMESPACES`.
 
 ### `convert_concept`
 
-`{ "id": "...", "from": "vector"|"markdown"|"thoughtform", "to": "vector"|"markdown"|"thoughtform" }` → `{ "converted": { "from", "to" }, "concept": {...} }`
+`{ "id": "...", "namespace"?, "from": "vector"|"markdown"|"thoughtform", "to": "vector"|"markdown"|"thoughtform", "overwrite"? }` → `{ "converted": { "from", "to" }, "concept": {...} }`
+
+The result is stored as a **derived** representation (see `derived` in `read_concept`). A conversion never replaces an **authored** representation (one a caller wrote) unless `overwrite: true`; otherwise it fails with `OVERWRITE_REFUSED`. Replacing an earlier derived one is allowed. The write is conditional on the version the source was read at, so a concurrent edit of the source surfaces as `VERSION_CONFLICT`.
 
 | Conversion | Requires an LLM? |
 |---|---|
-| `thoughtform → vector`, `thoughtform → markdown`, `markdown → vector` | No — deterministic |
-| `markdown → thoughtform`, `vector → markdown`, `vector → thoughtform` | Yes — set `POLYTICIAN_LLM_PROVIDER` (or `POLYTICIAN_NLP_PIPELINE=rule-based` for `markdown → thoughtform`) |
+| `thoughtform → vector`, `thoughtform → markdown`, `markdown → vector` | No. `markdown → vector` and `thoughtform → vector` depend on the embedding model; `thoughtform → markdown` is a fixed template |
+| `markdown → thoughtform` | Yes: set `POLYTICIAN_LLM_PROVIDER`, or `POLYTICIAN_NLP_PIPELINE=rule-based` |
+| `vector → markdown`, `vector → thoughtform` | Yes: set `POLYTICIAN_LLM_PROVIDER`. The LLM is given the concept's nearest neighbours **from its own namespace**, and their ids are recorded in `derived.<rep>.sources`. There is no non-LLM path, because a vector cannot be decoded back into text |
 
 ### `embed_text`
 
@@ -217,7 +234,7 @@ Results are namespace-scoped by default; pass `crossNamespace: true` to search g
 
 ### `health_check` / `get_stats`
 
-`{ "namespace"? }` → server + embedding model + LLM provider status, and concept/representation counts for that namespace.
+`{ "namespace"? }` → server + embedding model + LLM provider status, and concept/representation counts for that namespace (default `"default"`).
 
 ### `agentvault_backup`
 
@@ -235,7 +252,7 @@ Registered only when `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` are set
 | `vault_archive_concept` | Permanently archive a concept to Arweave, returning a transaction ID/URL |
 | `vault_get_secret` | Fetch secret **metadata** (name, provider, rotation date, length) — never the raw value |
 | `vault_memory_repo_log` | Inspect the `memory_repo` branch head and entry state |
-| `vault_restore` | Restore concepts and rebuild the FAISS index from an inline bundle or file path |
+| `vault_restore` | Restore concepts from an inline bundle or file path. Each concept is validated and saved into its bundle namespace; namespaces outside `POLYTICIAN_NAMESPACES`, and ids that already live in another namespace, are reported as per-concept errors |
 
 ---
 
@@ -266,7 +283,15 @@ A **concept** is the unit of memory. Any subset of its three representations can
 }
 ```
 
-`convert_concept` moves between these on demand — deterministically for the vector/markdown/thoughtform-derived paths, and via your configured LLM or NLP pipeline for the paths that need to *generate* rather than *derive* content.
+`convert_concept` moves between these on demand: without an LLM for the vector/markdown/thoughtform-derived paths, and via your configured LLM or NLP pipeline for the paths that need to *generate* rather than *derive* content.
+
+### Namespaces
+
+A namespace scopes every tool call. `save_concept`, `read_concept`, `delete_concept`, `convert_concept`, `list_concepts`, `search_concepts`, `get_stats` and the `vault_*` tools all take `namespace` (default `"default"`). A concept is only visible through its own namespace: reading, deleting or converting it through another namespace is `NOT_FOUND`, and writing to it is `NAMESPACE_DENIED`.
+
+`POLYTICIAN_NAMESPACES` is the operator's allowlist. When it is set to a list, calls naming any other namespace (including the implicit `"default"`) are `NAMESPACE_DENIED`, and `crossNamespace` search spans exactly the list. `*` allows every namespace and lets `crossNamespace` span them all. Unset allows every namespace and refuses `crossNamespace`.
+
+**Boundary:** the namespace is chosen by the caller. Polytician does not authenticate callers, so the allowlist bounds which namespaces a server exposes, but it does not stop one client of that server from naming another client's namespace. To isolate agents from each other, give each one its own server process with its own `POLYTICIAN_NAMESPACES`, or put a policy layer in front of the tools (for example an OpenAPPA battery keyed on the `namespace` argument).
 
 ---
 
@@ -291,7 +316,7 @@ kubectl apply -f k8s/polytician.yml
 kubectl apply -f k8s/sidecar.yml
 ```
 
-`k8s/polytician.yml` deploys 3 replicas behind a `ClusterIP` service on port 8787 — pair with `POLYTICIAN_DB_BACKEND=postgres` and `POLYTICIAN_ASYNC_INDEX_SYNC=true` for a real multi-replica deployment.
+`k8s/polytician.yml` deploys 3 replicas behind a `ClusterIP` service on port 8787 — pair with `POLYTICIAN_DB_BACKEND=postgres` so the replicas share one store (each write updates the row and its vector in one transaction, so there is no separate index sync to run).
 
 ### systemd / PM2
 
@@ -301,7 +326,11 @@ The build is a single `node dist/index.js` process reading stdio, so any standar
 
 ## Postgres / pgvector Backend
 
-Set `POLYTICIAN_DB_BACKEND=postgres` and `POLYTICIAN_POSTGRES_URL` to point at a Postgres instance with the `vector` extension available (the `pgvector/pgvector` Docker image is the easiest path). The adapter (`src/db/postgres-adapter.ts`) runs `CREATE EXTENSION IF NOT EXISTS vector` and creates its tables on startup — there's no separate migration step to run first. This backend is what backs the multi-node / distributed deployments in `docker-compose.yml` and `k8s/`.
+Set `POLYTICIAN_DB_BACKEND=postgres` and `POLYTICIAN_POSTGRES_URL` to point at a Postgres instance with the `vector` extension available (the `pgvector/pgvector` Docker image is the easiest path). The adapter (`src/db/postgres-adapter.ts`) runs `CREATE EXTENSION IF NOT EXISTS vector`, creates its tables and applies its schema migrations on startup, under an advisory lock so several nodes can start at once. There is no separate migration step to run first. This backend is what backs the multi-node / distributed deployments in `docker-compose.yml` and `k8s/`.
+
+Vectors are indexed with HNSW over cosine distance (`vector_cosine_ops`), which needs pgvector ≥ 0.5. Use pgvector ≥ 0.8 if you can: filtered searches (every search is filtered by namespace) then use HNSW iterative scans. On older pgvector they fall back to an exact scan, which returns correct results but costs a scan of the matching rows.
+
+Run the adapter's tests against a disposable database with `POLYTICIAN_TEST_POSTGRES_URL=postgres://... npx vitest run tests/postgres-adapter.test.ts`. They are skipped when the variable is unset.
 
 ---
 
@@ -358,6 +387,8 @@ curl http://localhost:8787/health
 | Slow first request | The embedding model is downloading (~30 MB) into `POLYTICIAN_DATA_DIR/models`; subsequent runs are instant |
 | `Embedding dimension mismatch` | You've pointed `POLYTICIAN_EMBEDDING_MODEL` at a model that doesn't output 384-dim vectors |
 | `markdown → thoughtform` / `vector → *` conversions fail | Set `POLYTICIAN_LLM_PROVIDER` (or `POLYTICIAN_NLP_PIPELINE=rule-based`) |
+| `OVERWRITE_REFUSED` on convert | The target representation was written by a caller; pass `overwrite: true` to replace it |
+| `NAMESPACE_DENIED` | The namespace is not in `POLYTICIAN_NAMESPACES`, `crossNamespace` was used without it, or the concept lives in another namespace |
 | Postgres backend won't start | Confirm `POLYTICIAN_POSTGRES_URL` is reachable and the role can `CREATE EXTENSION vector` |
 | `VERSION_CONFLICT` on save | Another writer updated the concept first — re-read it and retry with the new version |
 

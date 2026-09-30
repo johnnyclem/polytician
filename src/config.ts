@@ -24,8 +24,15 @@ export interface DistributedConfig {
   nodeId: string;
   externalStateUrl: string | null;
   vectorIndexUrl: string | null;
-  asyncIndexSync: boolean;
 }
+
+/**
+ * Namespaces this server may address.
+ * - `null` (unset): any namespace; cross-namespace search is refused.
+ * - `'*'`: any namespace; cross-namespace search spans all of them.
+ * - a list: only these namespaces; cross-namespace search spans the list.
+ */
+export type NamespaceAllowlist = readonly string[] | '*' | null;
 
 export interface BackupConfig {
   /** Number of saves before auto-backup triggers. 0 disables auto-backup. */
@@ -44,6 +51,7 @@ export interface PolyticianConfig {
   healthPort: number;
   sidecarUrl: string | null;
   distributed: DistributedConfig;
+  namespaces: NamespaceAllowlist;
   agentVault?: AgentVaultConfig;
   /** Enable VetKeys-style encryption for ThoughtForm bundles. */
   encrypt: boolean;
@@ -158,9 +166,10 @@ export function getConfig(): PolyticianConfig {
       externalStateUrl:
         process.env['POLYTICIAN_EXTERNAL_STATE_URL'] ?? distFile.externalStateUrl ?? null,
       vectorIndexUrl: process.env['POLYTICIAN_VECTOR_INDEX_URL'] ?? distFile.vectorIndexUrl ?? null,
-      asyncIndexSync:
-        parseBool(process.env['POLYTICIAN_ASYNC_INDEX_SYNC']) ?? distFile.asyncIndexSync ?? false,
     },
+    namespaces: parseNamespaces(
+      process.env['POLYTICIAN_NAMESPACES'] ?? (fileConfig as Record<string, unknown>).namespaces
+    ),
     agentVault: agentVaultConfig,
     encrypt: !!encryptFlag,
     backup: {
@@ -178,6 +187,20 @@ export function getConfig(): PolyticianConfig {
 
 function generateNodeId(): string {
   return `node-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Accepts `'*'`, a comma-separated string, or a string array; anything else means unset. */
+function parseNamespaces(raw: unknown): NamespaceAllowlist {
+  if (raw === undefined || raw === null) return null;
+  if (raw === '*') return '*';
+  const items = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : null;
+  if (!items) return null;
+  const list = items
+    .filter((n): n is string => typeof n === 'string')
+    .map(n => n.trim())
+    .filter(n => n.length > 0);
+  if (list.includes('*')) return '*';
+  return list.length > 0 ? [...new Set(list)] : null;
 }
 
 function parseBool(value: string | undefined): boolean | undefined {

@@ -5,11 +5,43 @@ import { dirname } from 'node:path';
 import type {
   DatabaseAdapter,
   ConceptRow,
+  ConceptUpdateFields,
+  ConceptWrite,
+  WriteOutcome,
   ListRow,
+  VectorFilter,
   VectorResult,
   ConceptMetaRow,
   StatsResult,
 } from './adapter.js';
+import { VECTOR_DIMENSION, embeddingProblem } from '../types/concept.js';
+import { deserializeEmbedding } from './embedding-codec.js';
+
+/** vec0 rejects larger k values. */
+const MAX_KNN_K = 4096;
+
+/** Columns ConceptUpdateFields may set; guards the dynamic SET clause. */
+const UPDATABLE_COLUMNS = new Set([
+  'version',
+  'updated_at',
+  'tags',
+  'markdown',
+  'thoughtform',
+  'embedding',
+  'derived',
+]);
+
+/** Thrown inside a transaction to roll it back when a write's precondition fails. */
+class PreconditionFailed extends Error {
+  constructor(readonly index: number) {
+    super(`write ${index} precondition failed`);
+  }
+}
+
+/** `EXISTS` clause matching one exact tag in a JSON-array `tags` column. */
+function tagClause(column: string): string {
+  return `EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ?)`;
+}
 
 export class SqliteAdapter implements DatabaseAdapter {
   private db: DatabaseType;
@@ -43,24 +75,29 @@ export class SqliteAdapter implements DatabaseAdapter {
         tags TEXT DEFAULT '[]',
         markdown TEXT,
         thoughtform TEXT,
-        embedding BLOB
+        embedding BLOB,
+        derived TEXT NOT NULL DEFAULT '{}'
       )
     `);
 
-    // Add namespace and version columns if missing (migration for existing DBs)
-    try {
-      this.db.exec(`ALTER TABLE concepts ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'`);
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec(`ALTER TABLE concepts ADD COLUMN version INTEGER NOT NULL DEFAULT 1`);
-    } catch {
-      // Column already exists
+    // Add columns introduced after the first release (migration for existing DBs)
+    for (const column of [
+      `namespace TEXT NOT NULL DEFAULT 'default'`,
+      `version INTEGER NOT NULL DEFAULT 1`,
+      `derived TEXT NOT NULL DEFAULT '{}'`,
+    ]) {
+      try {
+        this.db.exec(`ALTER TABLE concepts ADD COLUMN ${column}`);
+      } catch {
+        // Column already exists
+      }
     }
 
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_concepts_namespace ON concepts(namespace, updated_at)
     `);
 
     this.db.exec(`
@@ -70,12 +107,50 @@ export class SqliteAdapter implements DatabaseAdapter {
       )
     `);
 
-    this.db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS concept_vectors USING vec0(
-        concept_id TEXT PRIMARY KEY,
-        embedding float[384]
-      )
-    `);
+    this.migrateVectorIndex();
+  }
+
+  /**
+   * The vector index partitions by namespace (so namespace filters run inside
+   * the KNN query) and uses cosine distance. Databases from 2.x have an
+   * unpartitioned L2 index; it is rebuilt from `concepts.embedding`, the
+   * source of truth. Embeddings that could never be searched (wrong length
+   * from a failed, non-atomic 2.x save, non-finite or zero) are cleared.
+   */
+  private migrateVectorIndex(): void {
+    const existing = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'concept_vectors'")
+      .get() as { sql: string } | undefined;
+    const current =
+      existing !== undefined &&
+      /partition key/i.test(existing.sql) &&
+      /distance_metric=cosine/i.test(existing.sql);
+    if (current) return;
+
+    this.db.transaction(() => {
+      if (existing) this.db.exec('DROP TABLE concept_vectors');
+      // Each partition (namespace) allocates whole chunks; 128 rows per chunk
+      // keeps a small namespace at ~200 KB instead of vec0's default ~1.5 MB.
+      this.db.exec(`
+        CREATE VIRTUAL TABLE concept_vectors USING vec0(
+          concept_id TEXT PRIMARY KEY,
+          namespace TEXT partition key,
+          embedding float[${VECTOR_DIMENSION}] distance_metric=cosine,
+          chunk_size=128
+        )
+      `);
+      const rows = this.db
+        .prepare('SELECT id, namespace, embedding FROM concepts WHERE embedding IS NOT NULL')
+        .all() as Array<{ id: string; namespace: string; embedding: Buffer }>;
+      const clear = this.db.prepare('UPDATE concepts SET embedding = NULL WHERE id = ?');
+      for (const row of rows) {
+        const usable =
+          row.embedding.byteLength === VECTOR_DIMENSION * 4 &&
+          embeddingProblem(deserializeEmbedding(row.embedding)) === null;
+        if (usable) this.upsertVector(row.id, row.namespace, row.embedding);
+        else clear.run(row.id);
+      }
+    })();
   }
 
   close(): void {
@@ -86,17 +161,94 @@ export class SqliteAdapter implements DatabaseAdapter {
     return (
       (this.db
         .prepare(
-          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding FROM concepts WHERE id = ?'
+          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived FROM concepts WHERE id = ?'
         )
         .get(id) as ConceptRow | undefined) ?? null
     );
   }
 
+  applyWrites(writes: ConceptWrite[]): WriteOutcome {
+    const apply = this.db.transaction((batch: ConceptWrite[]) => {
+      batch.forEach((write, index) => {
+        if (!this.applyWrite(write)) throw new PreconditionFailed(index);
+      });
+    });
+    try {
+      apply(writes);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof PreconditionFailed) return { ok: false, index: err.index };
+      throw err;
+    }
+  }
+
+  /** Runs inside applyWrites' transaction; false means the precondition failed. */
+  private applyWrite(write: ConceptWrite): boolean {
+    switch (write.kind) {
+      case 'insert': {
+        const { row } = write;
+        const inserted = this.db
+          .prepare(
+            `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+          )
+          .run(
+            row.id,
+            row.namespace,
+            row.version,
+            row.created_at,
+            row.updated_at,
+            row.tags,
+            row.markdown,
+            row.thoughtform,
+            row.embedding,
+            row.derived ?? '{}'
+          );
+        if (inserted.changes === 0) return false;
+        if (row.embedding) this.upsertVector(row.id, row.namespace, row.embedding);
+        return true;
+      }
+      case 'update': {
+        const entries = this.updateEntries(write.fields);
+        const setClause = entries.map(([k]) => `${k} = ?`).join(', ');
+        const updated = this.db
+          .prepare(`UPDATE concepts SET ${setClause} WHERE id = ? AND version = ?`)
+          .run(...entries.map(([, v]) => v), write.id, write.expectedVersion);
+        if (updated.changes === 0) return false;
+        if (write.fields.embedding === null) this.deleteVector(write.id);
+        else if (write.fields.embedding) {
+          this.upsertVector(write.id, write.namespace, write.fields.embedding);
+        }
+        return true;
+      }
+      case 'delete': {
+        const deleted =
+          write.namespace === undefined
+            ? this.db.prepare('DELETE FROM concepts WHERE id = ?').run(write.id)
+            : this.db
+                .prepare('DELETE FROM concepts WHERE id = ? AND namespace = ?')
+                .run(write.id, write.namespace);
+        if (deleted.changes === 0) return false;
+        this.deleteVector(write.id);
+        return true;
+      }
+    }
+  }
+
+  private updateEntries(fields: ConceptUpdateFields): Array<[string, unknown]> {
+    const entries = Object.entries(fields).filter(([, v]) => v !== undefined);
+    for (const [key] of entries) {
+      if (!UPDATABLE_COLUMNS.has(key)) throw new Error(`Cannot update column '${key}'`);
+    }
+    if (entries.length === 0) throw new Error('Update has no fields');
+    return entries;
+  }
+
   insertConcept(row: ConceptRow): void {
     this.db
       .prepare(
-        `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         row.id,
@@ -107,16 +259,18 @@ export class SqliteAdapter implements DatabaseAdapter {
         row.tags,
         row.markdown,
         row.thoughtform,
-        row.embedding
+        row.embedding,
+        row.derived ?? '{}'
       );
   }
 
-  updateConcept(id: string, fields: Record<string, unknown>): void {
-    const keys = Object.keys(fields);
-    if (keys.length === 0) return;
-    const setClauses = keys.map(k => `${k} = ?`).join(', ');
-    const values = Object.values(fields);
-    this.db.prepare(`UPDATE concepts SET ${setClauses} WHERE id = ?`).run(...values, id);
+  updateConcept(id: string, fields: ConceptUpdateFields): void {
+    if (Object.values(fields).every(v => v === undefined)) return;
+    const entries = this.updateEntries(fields);
+    const setClause = entries.map(([k]) => `${k} = ?`).join(', ');
+    this.db
+      .prepare(`UPDATE concepts SET ${setClause} WHERE id = ?`)
+      .run(...entries.map(([, v]) => v), id);
   }
 
   deleteConcept(id: string): void {
@@ -135,11 +289,9 @@ export class SqliteAdapter implements DatabaseAdapter {
       queryParams.push(params.namespace);
     }
 
-    if (params.tags && params.tags.length > 0) {
-      for (const tag of params.tags) {
-        conditions.push('tags LIKE ?');
-        queryParams.push(`%"${tag}"%`);
-      }
+    for (const tag of params.tags ?? []) {
+      conditions.push(tagClause('concepts.tags'));
+      queryParams.push(tag);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -157,23 +309,41 @@ export class SqliteAdapter implements DatabaseAdapter {
     return { rows, total: countResult.count };
   }
 
-  upsertVector(id: string, embedding: Buffer): void {
+  upsertVector(id: string, namespace: string, embedding: Buffer): void {
+    // vec0 cannot UPDATE a partition key, so replace the row.
     this.db.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
     this.db
-      .prepare('INSERT INTO concept_vectors (concept_id, embedding) VALUES (?, ?)')
-      .run(id, embedding);
+      .prepare('INSERT INTO concept_vectors (concept_id, namespace, embedding) VALUES (?, ?, ?)')
+      .run(id, namespace, embedding);
   }
 
   deleteVector(id: string): void {
     this.db.prepare('DELETE FROM concept_vectors WHERE concept_id = ?').run(id);
   }
 
-  vectorSearch(queryEmbedding: Buffer, k: number): VectorResult[] {
+  vectorSearch(queryEmbedding: Buffer, k: number, filter: VectorFilter): VectorResult[] {
+    const conditions = ['embedding MATCH ?', 'k = ?'];
+    const params: unknown[] = [queryEmbedding, Math.min(k, MAX_KNN_K)];
+
+    // Both filters are constraints on the vec0 scan itself: `namespace` is the
+    // partition key and `concept_id IN (...)` restricts candidate rows, so the
+    // KNN ranks only matching rows.
+    if (filter.namespaces !== null) {
+      if (filter.namespaces.length === 0) return [];
+      conditions.push(`namespace IN (${filter.namespaces.map(() => '?').join(', ')})`);
+      params.push(...filter.namespaces);
+    }
+    if (filter.tags && filter.tags.length > 0) {
+      const tagConditions = filter.tags.map(() => tagClause('c.tags')).join(' AND ');
+      conditions.push(`concept_id IN (SELECT c.id FROM concepts c WHERE ${tagConditions})`);
+      params.push(...filter.tags);
+    }
+
     return this.db
       .prepare(
-        'SELECT concept_id, distance FROM concept_vectors WHERE embedding MATCH ? AND k = ? ORDER BY distance'
+        `SELECT concept_id, distance FROM concept_vectors WHERE ${conditions.join(' AND ')} ORDER BY distance`
       )
-      .all(queryEmbedding, k) as VectorResult[];
+      .all(...params) as VectorResult[];
   }
 
   findConceptMeta(ids: string[]): ConceptMetaRow[] {
@@ -198,7 +368,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     ).count;
 
     const vectorSubquery = namespace
-      ? 'SELECT COUNT(*) as count FROM concept_vectors WHERE concept_id IN (SELECT id FROM concepts WHERE namespace = ?)'
+      ? 'SELECT COUNT(*) as count FROM concept_vectors WHERE namespace = ?'
       : 'SELECT COUNT(*) as count FROM concept_vectors';
     const vectorCount = (this.db.prepare(vectorSubquery).get(...nsParam) as { count: number })
       .count;

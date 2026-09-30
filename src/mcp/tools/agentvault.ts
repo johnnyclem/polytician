@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { conceptService } from '../../services/concept.service.js';
+import { resolveNamespace } from '../../services/namespace-policy.js';
+import { NamespaceSchema } from '../../types/concept.js';
 import { logger } from '../../logger.js';
+import { errorPayload } from '../tool-result.js';
 
 /**
  * In-memory tracker for the last successful backup timestamp.
@@ -34,7 +37,7 @@ export interface BackupBundle {
  * byte-size and SHA-256 hash.
  */
 async function serializeBackupBundle(
-  namespace: string | undefined,
+  namespace: string,
   lastSynced: number
 ): Promise<{ bundle: BackupBundle; json: string; sizeBytes: number; sha256: string }> {
   const PAGE_SIZE = 100;
@@ -48,7 +51,7 @@ async function serializeBackupBundle(
 
     for (const summary of page.concepts) {
       // Fetch the full concept with all representations
-      const full = await conceptService.read(summary.id);
+      const full = await conceptService.read(summary.id, undefined, { namespace });
       allConcepts.push({
         id: full.id,
         namespace: full.namespace ?? 'default',
@@ -82,17 +85,22 @@ async function serializeBackupBundle(
  * Registers the `agentvault_backup` tool on the given MCP server.
  */
 export function registerBackupTool(server: McpServer): void {
-  server.tool(
+  server.registerTool(
     'agentvault_backup',
-    'Create a full backup bundle of all Polytician concepts. Serializes concepts into a portable JSON bundle, logs bundle size and SHA-256 hash, and returns success metadata.',
     {
-      namespace: z
-        .string()
-        .optional()
-        .describe('Namespace to back up. Omit for the default namespace.'),
+      description:
+        'Create a full backup bundle of all Polytician concepts. Serializes concepts into a portable JSON bundle, logs bundle size and SHA-256 hash, and returns success metadata.',
+      inputSchema: z
+        .object({
+          namespace: NamespaceSchema.optional().describe(
+            'Namespace to back up. Omit for the default namespace.'
+          ),
+        })
+        .strict(),
     },
-    async ({ namespace }) => {
+    async ({ namespace: requested }) => {
       try {
+        const namespace = resolveNamespace(requested);
         const lastSynced = lastBackupTimestamp;
         const { sizeBytes, sha256, bundle } = await serializeBackupBundle(namespace, lastSynced);
 
@@ -100,7 +108,7 @@ export function registerBackupTool(server: McpServer): void {
           conceptCount: bundle.concepts.length,
           sizeBytes,
           sha256,
-          namespace: namespace ?? 'default',
+          namespace,
         });
 
         // Update the in-memory last-backup timestamp on success
@@ -116,7 +124,7 @@ export function registerBackupTool(server: McpServer): void {
                   conceptCount: bundle.concepts.length,
                   sizeBytes,
                   sha256,
-                  namespace: namespace ?? 'default',
+                  namespace,
                   lastSynced,
                   createdAt: bundle.createdAt,
                 },
@@ -133,7 +141,7 @@ export function registerBackupTool(server: McpServer): void {
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify({ error: String(err) }),
+              text: JSON.stringify(errorPayload(err)),
             },
           ],
         };
