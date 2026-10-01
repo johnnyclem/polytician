@@ -70,6 +70,7 @@ Upgrade notes for every breaking change are in [MIGRATION.md](MIGRATION.md).
 ### Fixed
 
 - A failed embedding-model load (for example the first download while offline) is retried on the next call instead of failing every embedding until restart.
+- Rule-based relationship inference (`markdown → thoughtform` with `POLYTICIAN_NLP_PIPELINE=rule-based`) is linear in the text instead of roughly cubic in the number of entities: lines and bullets are separate sentences, only neighbouring mentions are paired, and mentions are found by word lookup (capped at 64 per sentence and 5,000 relationships). A 1,000-entity note took about 5 s and blocked the server; 10,000 entities now take about 0.1 s.
 - A backup can be restored: in 2.x the only persisted backups (auto-backups) stored tags and thoughtforms as JSON strings and no vectors, so a restore corrupted tags (a later tag merge produced `["[", "\"", ...]`), double-encoded thoughtforms and left nothing searchable.
 - Namespace- and tag-filtered search no longer post-filters a global top-k. The filters run inside the KNN query: the vec0 namespace partition key and a candidate-id constraint on sqlite-vec, SQL `WHERE` with HNSW iterative scan (or exact scan on pgvector < 0.8) on Postgres. A crowded namespace can no longer hide another namespace's matches.
 - Saving is atomic: the concept row and its vector are written in one transaction on both backends. A failed vector write no longer leaves a concept that reports a vector but is never found.

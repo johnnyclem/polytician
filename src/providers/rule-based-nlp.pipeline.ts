@@ -16,6 +16,68 @@ interface RawRelationship {
   confidence: number;
 }
 
+interface Mention {
+  entity: RawEntity;
+  start: number;
+  end: number;
+}
+
+interface EntityIndex {
+  byText: Map<string, RawEntity>;
+  unindexed: RawEntity[];
+  maxWords: number;
+}
+
+/** Entity mentions considered per sentence (a bullet or run-on line can name hundreds). */
+const MAX_MENTIONS_PER_SENTENCE = 64;
+
+/** Longest entity, in words, looked up at word boundaries. */
+const MAX_ENTITY_WORDS = 8;
+
+/** Entities that cannot be looked up by words and are searched for directly instead. */
+const MAX_UNINDEXED_ENTITIES = 256;
+
+/** Relationships inferred per text. */
+const MAX_RELATIONSHIPS = 5000;
+
+const VERB_PATTERNS = [
+  /^(?:,?\s*who\s+)?(\w+ed)\s/,
+  /^(?:,?\s*who\s+)?(\w+s)\s/,
+  /^(?:,?\s*who\s+)?(\w+)\s/,
+  /^(\w+ed)$/,
+  /^(\w+s)$/,
+  /^(\w+)$/,
+];
+
+const NON_VERBS = new Set([
+  'the',
+  'a',
+  'an',
+  'and',
+  'or',
+  'but',
+  'in',
+  'on',
+  'at',
+  'to',
+  'for',
+  'of',
+  'with',
+  'by',
+  'from',
+  'as',
+  'into',
+  'through',
+  'during',
+  'before',
+  'after',
+  'above',
+  'below',
+  'between',
+  'under',
+  'over',
+]);
+
 /**
  * Rule-based NLP pipeline that extracts entities using pattern matching
  * and infers relationships using dependency-style parsing.
@@ -149,36 +211,33 @@ export class RuleBasedNLPPipeline implements NLPPipeline {
    * - Subject-verb-object patterns between entities in the same sentence
    * - "X is a/an Y" → is_a relationship
    * - "X [verb] Y" → verb relationship
+   *
+   * Sentences end at . ! ? and at line breaks (so each bullet is its own
+   * sentence). Only neighbouring mentions are paired, and mentions are found
+   * by a word-start lookup, so the cost is linear in the text and the number
+   * of mentions rather than cubic in the number of entities.
    */
   private inferRelationships(text: string, entities: RawEntity[]): RawRelationship[] {
     const relationships: RawRelationship[] = [];
-    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+    const index = this.indexEntities(entities);
 
-    for (const sentence of sentences) {
+    for (const sentence of text.split(/[.!?]+|\n+/)) {
+      if (relationships.length >= MAX_RELATIONSHIPS) break;
       const sentLower = sentence.toLowerCase();
-      const presentEntities = entities.filter(e => sentLower.includes(e.text.toLowerCase()));
-
-      if (presentEntities.length < 2) continue;
-
-      // Try to find verb patterns between each pair of entities
-      for (let i = 0; i < presentEntities.length; i++) {
-        for (let j = i + 1; j < presentEntities.length; j++) {
-          const subj = presentEntities[i];
-          const obj = presentEntities[j];
-          if (!subj || !obj) continue;
-          const predicate = this.extractPredicate(
-            sentLower,
-            subj.text.toLowerCase(),
-            obj.text.toLowerCase()
-          );
-          if (predicate) {
-            relationships.push({
-              subjectId: subj.id,
-              predicate,
-              objectId: obj.id,
-              confidence: this.predicateConfidence(predicate),
-            });
-          }
+      const mentions = this.findMentions(sentLower, index);
+      for (let i = 0; i + 1 < mentions.length; i++) {
+        const subj = mentions[i];
+        const obj = mentions[i + 1];
+        if (!subj || !obj) continue;
+        const predicate = this.extractPredicate(sentLower, subj, obj);
+        if (predicate) {
+          relationships.push({
+            subjectId: subj.entity.id,
+            predicate,
+            objectId: obj.entity.id,
+            confidence: this.predicateConfidence(predicate),
+          });
+          if (relationships.length >= MAX_RELATIONSHIPS) break;
         }
       }
     }
@@ -187,67 +246,85 @@ export class RuleBasedNLPPipeline implements NLPPipeline {
   }
 
   /**
-   * Extract the predicate (verb phrase) between two entity mentions in a sentence.
+   * Entities by lower-cased text, for lookup at word boundaries. Entities that
+   * do not start and end with a word character, or span more than
+   * MAX_ENTITY_WORDS words, are searched for directly (at most
+   * MAX_UNINDEXED_ENTITIES of them).
    */
-  private extractPredicate(sentence: string, subjText: string, objText: string): string | null {
-    const subjIdx = sentence.indexOf(subjText);
-    const objIdx = sentence.indexOf(objText);
-    if (subjIdx === -1 || objIdx === -1) return null;
+  private indexEntities(entities: RawEntity[]): EntityIndex {
+    const byText = new Map<string, RawEntity>();
+    const unindexed: RawEntity[] = [];
+    let maxWords = 1;
+    for (const entity of entities) {
+      const lower = entity.text.toLowerCase();
+      const words = lower.match(/\w+/g)?.length ?? 0;
+      if (words > 0 && words <= MAX_ENTITY_WORDS && /^\w/.test(lower) && /\w$/.test(lower)) {
+        if (!byText.has(lower)) byText.set(lower, entity);
+        maxWords = Math.max(maxWords, words);
+      } else if (unindexed.length < MAX_UNINDEXED_ENTITIES) {
+        unindexed.push(entity);
+      }
+    }
+    return { byText, unindexed, maxWords };
+  }
 
-    // Get text between the two entities
-    const start = Math.min(subjIdx + subjText.length, objIdx + objText.length);
-    const end = Math.max(subjIdx, objIdx);
-    if (start >= end) return null;
+  /**
+   * First mention of each entity in a lower-cased sentence, in order of
+   * position (at most MAX_MENTIONS_PER_SENTENCE). A mention must start and
+   * end on word boundaries: each run of 1..maxWords words is looked up once.
+   */
+  private findMentions(sentLower: string, index: EntityIndex): Mention[] {
+    const mentions: Mention[] = [];
+    const seen = new Set<string>();
+    const add = (entity: RawEntity, start: number, end: number): void => {
+      if (seen.has(entity.id)) return;
+      seen.add(entity.id);
+      mentions.push({ entity, start, end });
+    };
 
-    const between = sentence.slice(start, end).trim();
+    const starts: number[] = [];
+    const ends: number[] = [];
+    const word = /\w+/g;
+    let match: RegExpExecArray | null;
+    while ((match = word.exec(sentLower)) !== null) {
+      starts.push(match.index);
+      ends.push(match.index + match[0].length);
+    }
+    for (let i = 0; i < starts.length; i++) {
+      const start = starts[i] ?? 0;
+      for (let j = i; j < Math.min(starts.length, i + index.maxWords); j++) {
+        const end = ends[j] ?? start;
+        const entity = index.byText.get(sentLower.slice(start, end));
+        if (entity) add(entity, start, end);
+      }
+    }
+    for (const entity of index.unindexed) {
+      const start = sentLower.indexOf(entity.text.toLowerCase());
+      if (start !== -1) add(entity, start, start + entity.text.length);
+    }
+
+    mentions.sort((a, b) => a.start - b.start || b.end - a.end);
+    return mentions.slice(0, MAX_MENTIONS_PER_SENTENCE);
+  }
+
+  /**
+   * Extract the predicate (verb phrase) between two neighbouring mentions in a sentence.
+   */
+  private extractPredicate(sentence: string, subj: Mention, obj: Mention): string | null {
+    if (subj.end >= obj.start) return null;
+
+    const between = sentence.slice(subj.end, obj.start).trim();
 
     // Check for common relationship patterns
     const isAMatch = /^(?:is|was|were|are)\s+(?:a|an|the)\s+/i.exec(between);
     if (isAMatch) return 'is_a';
 
-    const verbPatterns = [
-      /^(?:,?\s*who\s+)?(\w+ed)\s/,
-      /^(?:,?\s*who\s+)?(\w+s)\s/,
-      /^(?:,?\s*who\s+)?(\w+)\s/,
-      /^(\w+ed)$/,
-      /^(\w+s)$/,
-      /^(\w+)$/,
-    ];
-
-    for (const pattern of verbPatterns) {
+    for (const pattern of VERB_PATTERNS) {
       const verbMatch = pattern.exec(between);
       if (verbMatch?.[1]) {
         const verb = verbMatch[1];
         // Filter out common non-verb words
-        const nonVerbs = new Set([
-          'the',
-          'a',
-          'an',
-          'and',
-          'or',
-          'but',
-          'in',
-          'on',
-          'at',
-          'to',
-          'for',
-          'of',
-          'with',
-          'by',
-          'from',
-          'as',
-          'into',
-          'through',
-          'during',
-          'before',
-          'after',
-          'above',
-          'below',
-          'between',
-          'under',
-          'over',
-        ]);
-        if (!nonVerbs.has(verb)) return verb;
+        if (!NON_VERBS.has(verb)) return verb;
       }
     }
 

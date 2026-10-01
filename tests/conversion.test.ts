@@ -752,3 +752,53 @@ describe('RuleBasedNLPPipeline', () => {
     }
   });
 });
+
+// --- POLY-28: relationship inference must stay linear in the number of mentions ---
+
+describe('RuleBasedNLPPipeline relationship inference cost', () => {
+  /** A bulleted note naming `n` distinct people, the shape that took ~5 s at 1,000 entities. */
+  function bulletedNote(n: number): string {
+    const names: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = String.fromCharCode(65 + (i % 26)) + 'x' + i.toString(36).replace(/\d/g, d => 'abcdefghij'[Number(d)]!);
+      names.push(`- Person ${a.charAt(0).toUpperCase()}${a.slice(1)} met Agent Smith`);
+    }
+    return names.join('\n');
+  }
+
+  it('treats each line of a bulleted list as its own sentence', async () => {
+    const pipeline = new RuleBasedNLPPipeline();
+    const result = await pipeline.extractEntities(
+      '- Albert Einstein developed relativity\n- Marie Curie discovered polonium'
+    );
+    const byId = new Map(result.entities.map(e => [e.id, e.text]));
+    const pairs = result.relationships.map(r => [byId.get(r.subjectId), byId.get(r.objectId)]);
+    expect(pairs).not.toContainEqual(['Albert Einstein', 'Marie Curie']);
+  });
+
+  it('compares each mention only with its neighbour, not with every other entity', async () => {
+    const pipeline = new RuleBasedNLPPipeline();
+    const n = 400;
+    // One long sentence (no terminator) with n distinct entities.
+    const text = Array.from({ length: n }, (_, i) => `Entity ${'Abcdefghij'.charAt(0)}${i.toString(36).replace(/\d/g, d => 'abcdefghij'[Number(d)]!)} met`).join(' ');
+    const spy = vi.spyOn(
+      RuleBasedNLPPipeline.prototype as unknown as { extractPredicate: (...args: unknown[]) => unknown },
+      'extractPredicate'
+    );
+    try {
+      const result = await pipeline.extractEntities(text);
+      expect(result.entities.length).toBeGreaterThan(n / 2);
+      expect(spy.mock.calls.length).toBeLessThan(result.entities.length);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('handles a 2,000-entity bulleted note', async () => {
+    const pipeline = new RuleBasedNLPPipeline();
+    const text = bulletedNote(2000);
+    const result = await pipeline.extractEntities(text);
+    expect(result.entities.length).toBeGreaterThan(1000);
+    expect(result.relationships.length).toBeLessThanOrEqual(result.entities.length * 2);
+  });
+});
