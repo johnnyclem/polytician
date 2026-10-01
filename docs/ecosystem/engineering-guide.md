@@ -1,5 +1,15 @@
 # Ecosystem Engineering Guide: Polytician's Vantage Point
 
+> **Corrections for Polytician 3.0 (checked against the source).** The core server registers
+> 14 MCP tools (save/read/delete/list/batch/search/convert/embed/reembed, health_check,
+> get_stats, export/import/list_backups), plus up to 6 `vault_*` tools; search runs on
+> sqlite-vec or pgvector (there is no FAISS search, and the Python sidecar was removed).
+> `vault_restore`, `src/mcp/tools/agentvault.ts` and
+> `src/integrations/agent-vault/providers/agentvault-secret.provider.ts` no longer exist.
+> MCP is served over stdio or, with `--http`, Streamable HTTP. AgentVault's enricher calls do
+> not match Polytician's tool schemas (see the README's "Calling Polytician from AgentVault's
+> orchestrator"). Rows and statements below that conflict with this are marked *(superseded)*.
+
 ## Sourcing note
 
 Same scope as the executive summary: this session had full source access to
@@ -28,11 +38,11 @@ All paths below are relative to this repo (`johnnyclem/polytician`) and were rea
 | `src/integrations/agent-vault/connectors/archival.connector.ts` | 127 | Debounced Arweave archival, JWK loading from file path / inline JSON / env var |
 | `src/integrations/agent-vault/connectors/event-bridge.ts` | 66 | `AgentVaultEventBridge` — wires concept CRUD events to sync/archival connectors |
 | `src/integrations/agent-vault/providers/agentvault-llm.provider.ts` | 87 | Adapts AgentVault's inference chain as an LLM provider for Polytician itself |
-| `src/integrations/agent-vault/providers/agentvault-secret.provider.ts` | 37 | Adapts AgentVault's secret store as a secret provider for Polytician itself |
-| `src/integrations/agent-vault/tools/vault-tools.ts` | 422 | Registers 7 MCP tools: `vault_infer`, `vault_memory_push`, `vault_memory_pull`, `vault_archive_concept`, `vault_get_secret`, `vault_memory_repo_log`, `vault_restore` |
-| `src/mcp/tools/agentvault.ts` | — | Backup-bundle serialization (`serializeBackupBundle`) used by the vault tools |
+| ~~`src/integrations/agent-vault/providers/agentvault-secret.provider.ts`~~ | — | *(superseded: removed)* |
+| `src/integrations/agent-vault/tools/vault-tools.ts` | 326 | Registers up to 6 MCP tools: `vault_infer`, `vault_memory_push`, `vault_memory_pull`, `vault_get_secret`, `vault_memory_repo_log`, and `vault_archive_concept` when archival is enabled |
+| `src/mcp/tools/backup.ts` | — | `export_backup` / `import_backup` / `list_backups` (replaced 2.x's `agentvault_backup` and `vault_restore`) |
 | `docs/polyvault/spec-v1.md` | — | Full spec for **PolyVault**: encrypted (AES-256-GCM), gzip-compressed, chunked (≤1MB), deterministically-conflict-resolved backup/restore of ThoughtForms to an IC canister |
-| `docs/polyvault/runbook.md` | — | Operator runbook: exit codes, failure matrix, restore drill procedure |
+| `docs/polyvault/runbook.md` | — | PolyVault library exit codes and failure matrix, and a restore drill for the JSONL backup files (restores into a scratch store) |
 | `docs/polyvault-guardrails.md` | — | Non-negotiable implementation policy (fail-closed security, no plaintext-on-chain, idempotency requirements) |
 | `AGENTVAULT_COMPATIBILITY_PRD.md` | 646 | The spec (written from this repo) of what AgentVault needs to build to support Polytician — see status table below |
 | `tests/agentvault-integration.test.ts` | 156 | 12 tests: response unwrapping, path-allowlist security, auth |
@@ -42,12 +52,12 @@ All paths below are relative to this repo (`johnnyclem/polytician`) and were rea
 ## Data flow
 
 ```
-┌─────────────────────────┐         MCP (stdio)         ┌──────────────────────────┐
+┌─────────────────────────┐  MCP (stdio, or HTTP --http) ┌──────────────────────────┐
 │   AgentVault             │◄────────────────────────────│  Polytician MCP server    │
 │   orchestrator            │  search_concepts,           │  (this repo)              │
 │                            │  read_concept                │                          │
-│  polytician-enricher.ts   │─────────────────────────────►│  17 save/read/convert      │
-│  [AV-verified: exists,    │  (enriches prompts with      │  tools + FAISS search      │
+│  polytician-enricher.ts   │─────────────────────────────►│  14 core tools; sqlite-vec │
+│  [AV-verified: exists,    │  (enriches prompts with      │  / pgvector search         │
 │   truncates at N chars]   │   Polytician's semantic       │                          │
 └──────────┬────────────────┘   search results)            └──────────┬───────────────┘
            │                                                            │
@@ -111,11 +121,13 @@ redoing work that already exists.
 AgentVault's engineering guide **[AV-README]** makes exactly one substantive factual claim
 about Polytician: that `polytician-enricher.ts` does prompt enrichment via
 `search_concepts`/`read_concept` MCP calls with a hard character-count truncation. This is
-**confirmed** — the file exists at that path with that exact interface **[AV-verified]**, and
-Polytician's own MCP tool surface (17 tools per its README, including implicit
-`search_concepts`/`read_concept`-shaped read/convert commands) is consistent with what that
-enrichment code would need to call. No refutation to report here; this is one place the
-AgentVault-side docs got it right without over-claiming.
+**confirmed** that the file exists at that path with that exact interface **[AV-verified]**.
+*(superseded)* This guide originally added that Polytician's tool surface was consistent with
+what the enricher calls. It is not: the enricher sends `save_concept { name, content,
+representation, metadata }` and `search_concepts { query, limit, min_score }` and reads
+`content[0].data`, none of which Polytician accepts or returns. 2.x silently stored empty
+concepts; 3.0 returns a validation error naming the unknown keys. The fix is on AgentVault's
+side, against the contract documented in the README.
 
 ## Roadmap from Polytician's side
 

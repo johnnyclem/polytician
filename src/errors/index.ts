@@ -45,3 +45,41 @@ export class VersionConflictError extends PolyticianError {
     this.currentVersion = currentVersion;
   }
 }
+
+/** The caller may not address this namespace (allowlist, cross-namespace gate, or a namespace move). */
+export class NamespaceDeniedError extends PolyticianError {
+  constructor(message: string) {
+    super(message, 'NAMESPACE_DENIED');
+  }
+}
+
+/** A derived representation would replace an authored one and `overwrite` was not set. */
+export class OverwriteRefusedError extends PolyticianError {
+  constructor(id: string, representation: string) {
+    super(
+      `Concept '${id}' already has an authored ${representation} representation; pass overwrite: true to replace it with derived content`,
+      'OVERWRITE_REFUSED'
+    );
+  }
+}
+
+/**
+ * Stored vectors in the searched namespaces were made by a different
+ * embedding model than the one that embeds queries, so their scores would be
+ * meaningless. reembed_concepts re-derives them.
+ */
+export class EmbeddingModelMismatchError extends PolyticianError {
+  constructor(count: number, model: string, scope: string) {
+    super(
+      `${count} vector(s) in ${scope} were made by a different embedding model than the configured ${model}; ranking them against ${model} queries would be meaningless. Run reembed_concepts for the namespace (or switch POLYTICIAN_EMBEDDING_MODEL back) before searching.`,
+      'EMBEDDING_MODEL_MISMATCH'
+    );
+  }
+}
+
+/** A remote service (AgentVault) failed or answered with an error. */
+export class UpstreamError extends PolyticianError {
+  constructor(message: string) {
+    super(message, 'UPSTREAM_ERROR');
+  }
+}

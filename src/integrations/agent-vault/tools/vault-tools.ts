@@ -1,121 +1,92 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { readFile } from 'node:fs/promises';
 import type { AgentVaultConfig } from '../config.js';
 import { InferenceClient } from '../client/inference-client.js';
 import { MemoryRepoClient } from '../client/memory-repo-client.js';
-import { ArweaveUploadClient } from '../client/arweave-client.js';
 import { SecretClient } from '../client/secret-client.js';
+import { applyPulledEntries } from '../connectors/memory-sync.connector.js';
+import { sharedArchivalConnector } from '../connectors/archival.connector.js';
 import { conceptService } from '../../../services/concept.service.js';
 import { embeddingService } from '../../../services/embedding.service.js';
-import { getAdapter } from '../../../db/client.js';
-import type { ThoughtForm } from '../../../types/thoughtform.js';
+import { isNamespaceAllowed, resolveNamespace } from '../../../services/namespace-policy.js';
+import { PolyticianError, UpstreamError, ValidationError } from '../../../errors/index.js';
+import { NamespaceSchema, TagsSchema } from '../../../types/concept.js';
+import { LIMITS } from '../../../types/limits.js';
+import { jsonResult, runTool, type ToolResult } from '../../../mcp/tool-result.js';
+import {
+  VaultArchiveOut,
+  VaultGetSecretOut,
+  VaultInferOut,
+  VaultMemoryPullOut,
+  VaultMemoryPushOut,
+  VaultMemoryRepoLogOut,
+} from '../../../mcp/output-schemas.js';
+
+const namespaceArg = NamespaceSchema.optional().describe(
+  'Namespace the concept lives in (default: "default")'
+);
 
 /**
- * Shape of a serialized concept inside a vault bundle.
+ * Run a vault tool: Polytician errors keep their code, and any other failure
+ * (an AgentVault HTTP error, a timeout) becomes UPSTREAM_ERROR.
  */
-interface BundleConcept {
-  id: string;
-  namespace?: string;
-  markdown?: string | null;
-  thoughtform?: Record<string, unknown> | null;
-  embedding?: number[] | null;
-  tags?: string[];
-}
-
-interface VaultBundle {
-  version: number;
-  exportedAt: string;
-  concepts: BundleConcept[];
-}
-
-/**
- * Deserialize a raw bundle (JSON object or string) into a typed VaultBundle.
- * Validates required structure and returns the parsed bundle.
- */
-function deserializeBundle(raw: unknown): VaultBundle {
-  const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
-
-  if (!obj || typeof obj !== 'object') {
-    throw new Error('Bundle must be a JSON object');
-  }
-
-  const bundle = obj as Record<string, unknown>;
-
-  if (!Array.isArray(bundle.concepts)) {
-    throw new Error('Bundle must contain a "concepts" array');
-  }
-
-  const concepts = (bundle.concepts as Record<string, unknown>[]).map((c, i) => {
-    if (!c.id || typeof c.id !== 'string') {
-      throw new Error(`Bundle concept at index ${i} is missing a valid "id"`);
+function runVaultTool(operation: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
+  return runTool(operation, async () => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof PolyticianError) throw err;
+      throw new UpstreamError(err instanceof Error ? err.message : String(err));
     }
-    return {
-      id: c.id,
-      namespace: typeof c.namespace === 'string' ? c.namespace : undefined,
-      markdown: typeof c.markdown === 'string' ? c.markdown : null,
-      thoughtform:
-        c.thoughtform && typeof c.thoughtform === 'object'
-          ? (c.thoughtform as Record<string, unknown>)
-          : null,
-      embedding: Array.isArray(c.embedding) ? (c.embedding as number[]) : null,
-      tags: Array.isArray(c.tags)
-        ? (c.tags as unknown[]).filter((t): t is string => typeof t === 'string')
-        : [],
-    } satisfies BundleConcept;
   });
-
-  return {
-    version: typeof bundle.version === 'number' ? bundle.version : 1,
-    exportedAt:
-      typeof bundle.exportedAt === 'string' ? bundle.exportedAt : new Date().toISOString(),
-    concepts,
-  };
-}
-
-/**
- * Rebuild the vector index for a set of concept IDs by re-upserting their
- * embeddings into the adapter's vector table.
- */
-async function rebuildVectorIndex(conceptIds: string[]): Promise<number> {
-  const adapter = getAdapter();
-  let rebuilt = 0;
-
-  for (const id of conceptIds) {
-    const row = await adapter.findConcept(id);
-    if (row?.embedding) {
-      await adapter.upsertVector(id, row.embedding);
-      rebuilt++;
-    }
-  }
-
-  return rebuilt;
 }
 
 export function registerVaultTools(server: McpServer, config: AgentVaultConfig): void {
   const inferClient = new InferenceClient(config);
   const memClient = new MemoryRepoClient(config);
-  const arweaveClient = new ArweaveUploadClient(config);
   const secretClient = new SecretClient(config);
 
   // --- vault_infer ---
 
-  server.tool(
+  server.registerTool(
     'vault_infer',
-    "Run a prompt through AgentVault's inference fallback chain (Bittensor -> Venice AI -> local) and optionally save the result as a concept.",
     {
-      prompt: z.string().min(1).describe('Prompt text to send to the inference chain'),
-      systemPrompt: z.string().optional().describe('Optional system prompt'),
-      maxTokens: z.number().int().positive().optional(),
-      temperature: z.number().min(0).max(2).optional(),
-      saveAsConceptNamespace: z
-        .string()
-        .optional()
-        .describe('If set, save the inference result as a markdown concept in this namespace'),
-      tags: z.array(z.string()).optional(),
+      description:
+        'Run a prompt through AgentVault\'s inference fallback chain (Bittensor -> Venice AI -> local) and optionally save the result as a concept (provenance origin "llm").',
+      inputSchema: z
+        .object({
+          prompt: z
+            .string()
+            .min(1)
+            .max(LIMITS.markdownChars)
+            .describe('Prompt text to send to the inference chain'),
+          systemPrompt: z
+            .string()
+            .max(LIMITS.markdownChars)
+            .optional()
+            .describe('Optional system prompt'),
+          maxTokens: z.number().int().positive().optional(),
+          temperature: z.number().min(0).max(2).optional(),
+          saveAsConceptNamespace: NamespaceSchema.optional().describe(
+            'If set, save the inference result as a markdown concept in this namespace'
+          ),
+          tags: TagsSchema.optional(),
+        })
+        .strict(),
+      outputSchema: VaultInferOut,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
     },
-    async ({ prompt, systemPrompt, maxTokens, temperature, saveAsConceptNamespace, tags }) => {
-      try {
+    async ({ prompt, systemPrompt, maxTokens, temperature, saveAsConceptNamespace, tags }) =>
+      runVaultTool('vault_infer', async () => {
+        const saveNamespace =
+          saveAsConceptNamespace !== undefined
+            ? resolveNamespace(saveAsConceptNamespace)
+            : undefined;
         const res = await inferClient.infer({
           prompt,
           systemPrompt,
@@ -125,50 +96,68 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
         });
 
         let savedConceptId: string | undefined;
-        if (saveAsConceptNamespace) {
+        if (saveNamespace) {
           const embedding = await embeddingService.embed(res.text).catch(() => undefined);
           const concept = await conceptService.save({
-            namespace: saveAsConceptNamespace,
+            namespace: saveNamespace,
             markdown: res.text,
             embedding,
             tags: tags ?? [],
+            provenance: {
+              markdown: { origin: 'llm', model: `agentvault:${res.backend}` },
+              ...(embedding && {
+                vector: {
+                  origin: 'derived',
+                  derivedFrom: 'markdown',
+                  model: embeddingService.getModel(),
+                },
+              }),
+            },
           });
           savedConceptId = concept.id;
         }
 
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                text: res.text,
-                backend: res.backend,
-                latencyMs: res.latencyMs,
-                savedConceptId,
-              }),
-            },
-          ],
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
-      }
-    }
+        return jsonResult({
+          text: res.text,
+          backend: res.backend,
+          latencyMs: res.latencyMs,
+          savedConceptId,
+        });
+      })
   );
 
   // --- vault_memory_push ---
 
-  server.tool(
+  server.registerTool(
     'vault_memory_push',
-    "Push a Polytician concept to AgentVault's memory_repo canister immediately.",
     {
-      conceptId: z.string().uuid().describe('Concept UUID to push'),
+      description: "Push a Polytician concept to AgentVault's memory_repo canister immediately.",
+      inputSchema: z
+        .object({
+          conceptId: z.string().uuid().describe('Concept UUID to push'),
+          namespace: namespaceArg,
+        })
+        .strict(),
+      outputSchema: VaultMemoryPushOut,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
     },
-    async ({ conceptId }) => {
-      try {
-        const concept = await conceptService.read(conceptId);
+    async ({ conceptId, namespace }) =>
+      runVaultTool('vault_memory_push', async () => {
+        const concept = await conceptService.read(conceptId, undefined, {
+          namespace: resolveNamespace(namespace),
+        });
+        // Namespace and updatedAt let a later pull place the entry and order it (last write wins).
+        const metadata = {
+          conceptId,
+          namespace: concept.namespace,
+          version: concept.version,
+          updatedAt: concept.updatedAt,
+        };
         const entries = [];
         if (concept.markdown) {
           entries.push({
@@ -176,7 +165,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
             contentType: 'markdown' as const,
             data: concept.markdown,
             tags: concept.tags ?? [],
-            metadata: { conceptId, updatedAt: concept.updatedAt },
+            metadata,
           });
         }
         if (concept.thoughtform) {
@@ -185,288 +174,152 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
             contentType: 'json' as const,
             data: JSON.stringify(concept.thoughtform),
             tags: concept.tags ?? [],
-            metadata: { conceptId, updatedAt: concept.updatedAt },
+            metadata,
           });
         }
         const commit = await memClient.commit(`polytician: manual push ${conceptId}`, entries);
-        return {
-          content: [
-            { type: 'text' as const, text: JSON.stringify({ pushed: true, sha: commit.sha }) },
-          ],
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
-      }
-    }
+        return jsonResult({ pushed: true, sha: commit.sha });
+      })
   );
 
   // --- vault_memory_pull ---
 
-  server.tool(
+  server.registerTool(
     'vault_memory_pull',
-    "Pull all entries from AgentVault's memory_repo branch into Polytician concepts.",
-    {},
-    async () => {
-      try {
+    {
+      description:
+        'Pull markdown entries from AgentVault\'s memory_repo branch into concepts in one namespace (provenance origin "import"), last write wins: an entry replaces a local concept only when its updatedAt is newer, entries recorded for another namespace (or whose id lives in another namespace) are skipped, and ids must be UUIDs. Skipped entries are reported with a reason.',
+      inputSchema: z.object({ namespace: namespaceArg }).strict(),
+      outputSchema: VaultMemoryPullOut,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ namespace }) =>
+      runVaultTool('vault_memory_pull', async () => {
+        const ns = resolveNamespace(namespace);
         const branch = await memClient.getBranchState();
-        let imported = 0;
-        const mdEntries = branch.entries.filter(
-          e => e.key.startsWith('concepts/') && e.key.endsWith('/markdown')
-        );
-        for (const entry of mdEntries) {
-          const cid = entry.key.split('/')[1];
-          if (!cid) continue;
-          await conceptService.save({ id: cid, markdown: entry.data, tags: entry.tags });
-          imported++;
-        }
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                pulled: true,
-                branch: branch.branch,
-                headSha: branch.headSha,
-                imported,
-              }),
-            },
-          ],
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
-      }
-    }
+        const report = await applyPulledEntries(branch.entries, {
+          namespace: ns,
+          allowNamespace: isNamespaceAllowed,
+        });
+        return jsonResult({
+          pulled: true,
+          branch: branch.branch,
+          headSha: branch.headSha,
+          imported: report.imported.length,
+          skipped: report.skipped.length > 0 ? report.skipped : undefined,
+        });
+      })
   );
 
   // --- vault_archive_concept ---
 
-  server.tool(
-    'vault_archive_concept',
-    'Archive a concept to Arweave permanently via AgentVault. Returns the Arweave transaction ID and URL.',
-    {
-      conceptId: z.string().uuid().describe('Concept UUID to archive'),
-    },
-    async ({ conceptId }) => {
-      try {
-        const concept = await conceptService.read(conceptId);
-        const content = concept.markdown ?? JSON.stringify(concept.thoughtform);
-        if (!content) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({ error: 'Concept has no archivable content' }),
-              },
-            ],
-          };
-        }
-        const receipt = await arweaveClient.upload({
-          content,
-          contentType: concept.markdown ? 'markdown' : 'json',
-          tags: concept.tags ?? [],
-          metadata: {
-            conceptId,
-            namespace: concept.namespace ?? 'default',
-            version: concept.version,
-            archivedAt: Date.now(),
-          },
-        });
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                archived: true,
-                txId: receipt.txId,
-                url: receipt.url,
-                size: receipt.size,
-              }),
-            },
-          ],
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
-      }
-    }
-  );
+  // Only with archival enabled: the operator chose the tag filter and has a
+  // backup key and an Arweave wallet configured.
+  if (config.archival.enabled) {
+    const archival = sharedArchivalConnector(config);
+    server.registerTool(
+      'vault_archive_concept',
+      {
+        description: `Archive the current version of a concept to Arweave via AgentVault: permanent, public and paid, so it cannot be undone. The content is encrypted with the backup key before upload. Only concepts carrying every archival tag (${config.archival.tagFilter.join(', ')}) can be archived, and each version is archived once. Returns the Arweave transaction ID and URL.`,
+        inputSchema: z
+          .object({
+            conceptId: z.string().uuid().describe('Concept UUID to archive'),
+            namespace: namespaceArg,
+          })
+          .strict(),
+        outputSchema: VaultArchiveOut,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async ({ conceptId, namespace }) =>
+        runVaultTool('vault_archive_concept', async () => {
+          const outcome = await archival.archive(conceptId, resolveNamespace(namespace));
+          if (!outcome.archived) {
+            const why = {
+              'not-tagged': `the concept does not carry every archival tag (${config.archival.tagFilter.join(', ')})`,
+              'no-content': 'the concept has no markdown or thoughtform to archive',
+              'already-archived': 'this version of the concept is already archived',
+            }[outcome.reason];
+            throw new ValidationError(`Not archived: ${why}`);
+          }
+          const { receipt } = outcome;
+          return jsonResult({
+            archived: true,
+            encrypted: true,
+            txId: receipt.txId,
+            url: receipt.url,
+            size: receipt.size,
+          });
+        })
+    );
+  }
 
   // --- vault_get_secret ---
 
-  server.tool(
+  server.registerTool(
     'vault_get_secret',
-    "Retrieve a named secret from AgentVault's secret provider. Returns metadata only, never the raw value.",
     {
-      name: z.string().min(1).describe('Secret name in AgentVault'),
+      description:
+        "Retrieve a named secret from AgentVault's secret provider. Returns metadata only, never the raw value.",
+      inputSchema: z
+        .object({
+          name: z.string().min(1).max(256).describe('Secret name in AgentVault'),
+        })
+        .strict(),
+      outputSchema: VaultGetSecretOut,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
-    async ({ name }) => {
-      try {
+    async ({ name }) =>
+      runVaultTool('vault_get_secret', async () => {
         const secret = await secretClient.getSecret(name);
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                name: secret.name,
-                provider: secret.provider,
-                rotatedAt: secret.rotatedAt,
-                valueLength: secret.value.length,
-              }),
-            },
-          ],
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
-      }
-    }
+        return jsonResult({
+          name: secret.name,
+          provider: secret.provider,
+          rotatedAt: secret.rotatedAt,
+          valueLength: secret.value.length,
+        });
+      })
   );
 
   // --- vault_memory_repo_log ---
 
-  server.tool(
+  server.registerTool(
     'vault_memory_repo_log',
-    'Read the current state of the AgentVault memory_repo branch for this Polytician namespace.',
-    {},
-    async () => {
-      try {
-        const branch = await memClient.getBranchState();
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                branch: branch.branch,
-                headSha: branch.headSha,
-                entryCount: branch.entries.length,
-                conceptKeys: branch.entries
-                  .filter(e => e.key.startsWith('concepts/'))
-                  .map(e => e.key),
-              }),
-            },
-          ],
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
-      }
-    }
-  );
-
-  // --- vault_restore ---
-
-  server.tool(
-    'vault_restore',
-    'Restore concepts and vector index from a vault bundle. Accepts either inline bundle JSON or a file path to a bundle. Deserializes all concepts, saves them, and rebuilds the FAISS vector index.',
     {
-      bundle: z
-        .any()
-        .optional()
-        .describe('Inline bundle JSON object containing { version, exportedAt, concepts: [...] }'),
-      path: z
-        .string()
-        .optional()
-        .describe('File path to a JSON bundle file. Mutually exclusive with "bundle".'),
+      description:
+        'Read the current state of the AgentVault memory_repo branch Polytician syncs with (agentVault.memoryRepoBranch): its head and the keys of the concept entries on it, from every namespace. Takes no namespace.',
+      inputSchema: z.object({}).strict(),
+      outputSchema: VaultMemoryRepoLogOut,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
-    async ({ bundle, path }) => {
-      try {
-        if (!bundle && !path) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({
-                  error: 'Provide either "bundle" (inline JSON) or "path" (file path)',
-                }),
-              },
-            ],
-          };
-        }
-
-        if (bundle && path) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({
-                  error: '"bundle" and "path" are mutually exclusive — provide one, not both',
-                }),
-              },
-            ],
-          };
-        }
-
-        // Load raw bundle data
-        let raw: unknown;
-        if (path) {
-          const fileContents = await readFile(path, 'utf-8');
-          raw = JSON.parse(fileContents);
-        } else {
-          raw = bundle;
-        }
-
-        // Deserialize bundle
-        const parsed = deserializeBundle(raw);
-
-        // Restore concepts
-        const restoredIds: string[] = [];
-        const errors: Array<{ id: string; error: string }> = [];
-
-        for (const entry of parsed.concepts) {
-          try {
-            await conceptService.save({
-              id: entry.id,
-              namespace: entry.namespace,
-              markdown: entry.markdown ?? undefined,
-              thoughtform: entry.thoughtform ? (entry.thoughtform as ThoughtForm) : undefined,
-              embedding: entry.embedding ?? undefined,
-              tags: entry.tags,
-            });
-            restoredIds.push(entry.id);
-          } catch (err) {
-            errors.push({ id: entry.id, error: String(err) });
-          }
-        }
-
-        // Rebuild vector index for restored concepts
-        const vectorsRebuilt = await rebuildVectorIndex(restoredIds);
-
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                restored: true,
-                bundleVersion: parsed.version,
-                exportedAt: parsed.exportedAt,
-                conceptsRestored: restoredIds.length,
-                vectorsRebuilt,
-                errors: errors.length > 0 ? errors : undefined,
-              }),
-            },
-          ],
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: String(err) }) }],
-        };
-      }
-    }
+    async () =>
+      runVaultTool('vault_memory_repo_log', async () => {
+        const branch = await memClient.getBranchState();
+        return jsonResult({
+          branch: branch.branch,
+          headSha: branch.headSha,
+          entryCount: branch.entries.length,
+          conceptKeys: branch.entries.filter(e => e.key.startsWith('concepts/')).map(e => e.key),
+        });
+      })
   );
 }

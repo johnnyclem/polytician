@@ -1,0 +1,208 @@
+# polytician battery: the Polytician MCP server (shared semantic memory),
+# all 20 tools, polytician 3.0 (this repository). Namespaces are label
+# compartments: a tool call that names a namespace is labelled with that
+# namespace's readers, which the `polytician` audience source bound below
+# reads from an operator-written file (POLYTICIAN_NAMESPACE_READERS). Text
+# read from a namespace may go only to its readers, and a write into a
+# namespace needs data its readers may already see, so memory cannot carry
+# one compartment's data into another.
+#
+# Polytician applies `namespace` as "default" when it is omitted, so every
+# namespaced tool has a second rule for the omitted argument, labelled with
+# the `default` namespace's readers. A crossNamespace search reads every
+# namespace the server allows and cannot be told apart by argument (it is
+# a boolean), so a search without `namespace` gets the narrowest label,
+# `self`. Polytician refuses `namespace` together with `crossNamespace`.
+#
+# Trust follows who can write the text. Every write into memory below needs
+# trusted data, so reads keep the session's trust: suspicious text cannot
+# enter memory and come back trusted. That holds only while every writer of
+# these namespaces goes through this policy; see the README.
+#
+# Content written from outside the trajectory (a backup import, an
+# AgentVault pull, a saved vault_infer answer) and content leaving the
+# machine (an AgentVault push or Arweave archive) need the
+# `polytician-review` mark. The root config supplies an authority for it.
+
+[policy]
+version = 2
+
+[externals.audience.polytician]
+command = ["python3", "audience-source.py"]
+selectors = [{ template = "namespace/<namespace>" }]
+
+# --- reads: labelled with the namespace's readers ---
+
+[[policy.tool]]
+name = "mcp/polytician/read_concept(namespace:*)"
+delta = { audience = ["@polytician:namespace/$namespace"] }
+
+[[policy.tool]]
+name = "mcp/polytician/read_concept"
+delta = { audience = ["@polytician:namespace/default"] }
+
+[[policy.tool]]
+name = "mcp/polytician/list_concepts(namespace:*)"
+delta = { audience = ["@polytician:namespace/$namespace"] }
+
+[[policy.tool]]
+name = "mcp/polytician/list_concepts"
+delta = { audience = ["@polytician:namespace/default"] }
+
+[[policy.tool]]
+name = "mcp/polytician/search_concepts(namespace:*)"
+delta = { audience = ["@polytician:namespace/$namespace"] }
+
+# The default namespace, or with crossNamespace every allowed namespace.
+[[policy.tool]]
+name = "mcp/polytician/search_concepts"
+delta = { audience = ["self"] }
+
+# Counts and the embedding model; tags and ids are not returned.
+[[policy.tool]]
+name = "mcp/polytician/get_stats(namespace:*)"
+delta = { audience = ["@polytician:namespace/$namespace"] }
+
+[[policy.tool]]
+name = "mcp/polytician/get_stats"
+delta = { audience = ["@polytician:namespace/default"] }
+
+[[policy.tool]]
+name = "mcp/polytician/health_check(namespace:*)"
+delta = { audience = ["@polytician:namespace/$namespace"] }
+
+[[policy.tool]]
+name = "mcp/polytician/health_check"
+delta = { audience = ["@polytician:namespace/default"] }
+
+# Embeds the text locally and returns the vector; nothing is stored.
+[[policy.tool]]
+name = "mcp/polytician/embed_text"
+delta = {}
+
+# --- writes: trusted data, sharable with the namespace's readers ---
+
+# Returns the whole concept, including representations the call did not write.
+[[policy.tool]]
+name = "mcp/polytician/save_concept(namespace:*)"
+delta = { audience = ["@polytician:namespace/$namespace"] }
+requires = { trust = "trusted", audience = { contains = ["@polytician:namespace/$namespace"] } }
+effects = ["polytician.changed"]
+
+[[policy.tool]]
+name = "mcp/polytician/save_concept"
+delta = { audience = ["@polytician:namespace/default"] }
+requires = { trust = "trusted", audience = { contains = ["@polytician:namespace/default"] } }
+effects = ["polytician.changed"]
+
+# Returns the saved ids only.
+[[policy.tool]]
+name = "mcp/polytician/batch_save_concepts(namespace:*)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@polytician:namespace/$namespace"] } }
+effects = ["polytician.changed"]
+
+[[policy.tool]]
+name = "mcp/polytician/batch_save_concepts"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@polytician:namespace/default"] } }
+effects = ["polytician.changed"]
+
+# Derives one representation from another of the same concept (or, for
+# vector → text, from its nearest neighbours in the same namespace), so no
+# trajectory data enters the namespace; it returns the concept.
+[[policy.tool]]
+name = "mcp/polytician/convert_concept(namespace:*)"
+delta = { audience = ["@polytician:namespace/$namespace"] }
+requires = { trust = "trusted" }
+effects = ["polytician.changed"]
+
+[[policy.tool]]
+name = "mcp/polytician/convert_concept"
+delta = { audience = ["@polytician:namespace/default"] }
+requires = { trust = "trusted" }
+effects = ["polytician.changed"]
+
+# Re-derives vectors from each concept's own text; returns ids only.
+[[policy.tool]]
+name = "mcp/polytician/reembed_concepts"
+delta = {}
+requires = { trust = "trusted" }
+effects = ["polytician.changed"]
+
+# Returns the deleted id only.
+[[policy.tool]]
+name = "mcp/polytician/delete_concept"
+delta = {}
+requires = { trust = "trusted" }
+effects = ["polytician.deleted"]
+
+# --- backups: files in the server's own backups directory ---
+
+# Writes an owner-only file of every namespace the server serves; returns
+# its name, size and per-namespace counts.
+[[policy.tool]]
+name = "mcp/polytician/export_backup"
+delta = {}
+requires = { trust = "trusted" }
+effects = ["polytician.backup"]
+
+# Writes the backup's concepts, which no session of this trajectory wrote,
+# and can replace newer ones (onConflict: overwrite).
+[[policy.tool]]
+name = "mcp/polytician/import_backup"
+delta = {}
+requires = { trust = "trusted", attention = ["polytician-review"] }
+effects = ["polytician.changed"]
+
+# File names, sizes, creation times and key ids.
+[[policy.tool]]
+name = "mcp/polytician/list_backups"
+delta = {}
+
+# --- AgentVault tools (registered only when the operator configures AgentVault) ---
+
+# The prompt goes to AgentVault's inference chain (Bittensor, Venice AI),
+# outside the organisation, and the answer is written there.
+[[policy.tool]]
+name = "mcp/polytician/vault_infer(saveAsConceptNamespace:*)"
+delta = { trust = "suspicious" }
+requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["polytician-review"] }
+effects = ["polytician.egress", "polytician.changed"]
+
+[[policy.tool]]
+name = "mcp/polytician/vault_infer"
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+effects = ["polytician.egress"]
+
+# Sends the concept's markdown and thoughtform to the AgentVault memory_repo.
+[[policy.tool]]
+name = "mcp/polytician/vault_memory_push"
+delta = {}
+requires = { trust = "trusted", attention = ["polytician-review"] }
+effects = ["polytician.egress"]
+
+# Writes memory_repo entries, written outside this trajectory, into a namespace.
+[[policy.tool]]
+name = "mcp/polytician/vault_memory_pull"
+delta = {}
+requires = { trust = "trusted", attention = ["polytician-review"] }
+effects = ["polytician.changed"]
+
+# A permanent, paid Arweave upload (encrypted with the backup key).
+[[policy.tool]]
+name = "mcp/polytician/vault_archive_concept"
+delta = {}
+requires = { trust = "trusted", attention = ["polytician-review"] }
+effects = ["polytician.egress"]
+
+# Secret metadata: name, provider, rotation time and value length.
+[[policy.tool]]
+name = "mcp/polytician/vault_get_secret"
+delta = { audience = ["self"] }
+
+# The memory_repo branch head and its concept keys.
+[[policy.tool]]
+name = "mcp/polytician/vault_memory_repo_log"
+delta = { audience = ["internal"] }

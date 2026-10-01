@@ -68,7 +68,7 @@ describe('ConceptService', () => {
 
     it('should merge tags on update (union, not replace)', async () => {
       const id = '33333333-3333-4333-a333-333333333333';
-      await service.save({ id, tags: ['physics', 'science'] });
+      await service.save({ id, markdown: '# Tagged', tags: ['physics', 'science'] });
       const updated = await service.save({ id, tags: ['science', 'biography'] });
       expect(updated.tags).toEqual(expect.arrayContaining(['physics', 'science', 'biography']));
       expect(updated.tags).toHaveLength(3);

@@ -1,0 +1,34 @@
+# Calls without a namespace address "default" and carry its readers' label.
+
+mcp/polytician/read_concept {
+  id: "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+}
+expect allow
+
+mcp/mail/send {
+  to: "carol@corp.example"
+}
+expect deny
+
+mcp/mail/send {
+  to: "bob@corp.example"
+}
+expect allow
+
+# Namespaces may contain ':' and '.', as Polytician allows.
+mcp/polytician/list_concepts {
+  namespace: "ops:oncall"
+  assertionStatus: ["verified"]
+}
+expect allow
+
+# The trajectory is now default ∩ ops:oncall: alice only.
+mcp/mail/send {
+  to: "bob@corp.example"
+}
+expect deny
+
+mcp/mail/send {
+  to: "alice@corp.example"
+}
+expect allow

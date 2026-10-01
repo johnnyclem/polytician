@@ -234,6 +234,8 @@ export function parsePolyticianConfig(sourcePath: string, verbose?: boolean): Po
 export function findPolyticianConfigs(sourcePath: string): string[]
 ```
 
+> **Polytician 3.0:** the server no longer reads `.polytician.json` from its working directory (an opened project is not trusted). Its configuration is `~/.polytician/config.json`, `--config <path>`, or environment variables. A `.polytician.json` in a project directory can still serve as a packaging marker for detection, but it does not configure the server.
+
 **Detection heuristic:**
 1. `.polytician.json` exists in directory
 2. `package.json` has `polytician` in dependencies
@@ -309,8 +311,10 @@ Create `cli/commands/mcp.ts`:
 agentvault mcp register-polytician \
   --entry /path/to/polytician/dist/index.js \
   --namespace my-agent \
-  --health-port 8787
+  --health-port 8788
 ```
+
+> **Polytician 3.0:** a stdio Polytician serves `/health` only when started with `POLYTICIAN_HEALTH_PORT` (bound to `127.0.0.1`); with `--http` it serves `/health` and MCP on one port, 8788 by default (8787 is stenographer's). Probing a health port is therefore optional for stdio registrations.
 
 Steps:
 1. Probe `http://localhost:{healthPort}/health` to verify Polytician is running
@@ -541,7 +545,7 @@ program.addCommand(polyticianCommand);
 - Calls `vault_archive_concept`
 - Prints Arweave receipt (txId, URL, size)
 
-**`agentvault polytician register --entry <path> [--namespace ns] [--health-port 8787]`**
+**`agentvault polytician register --entry <path> [--namespace ns] [--health-port 8788]`**
 - Validates Polytician is running at the health port
 - Discovers available MCP tools
 - Calls `registerMCPServer()` on the canister

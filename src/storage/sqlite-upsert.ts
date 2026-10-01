@@ -6,7 +6,22 @@
  */
 
 import type { DatabaseAdapter, ConceptRow } from '../db/adapter.js';
+import { parseTags } from '../db/tags.js';
 import type { ThoughtFormV1 } from '../schemas/thoughtform.js';
+import type { ProvenanceMap } from '../types/concept.js';
+
+/** Provenance JSON of a row after a restore wrote its thoughtform (and markdown, from rawText). */
+function importedProvenance(existing: string | undefined, markdownWritten: boolean): string {
+  let provenance: ProvenanceMap = {};
+  try {
+    provenance = JSON.parse(existing ?? '{}') as ProvenanceMap;
+  } catch {
+    // Unreadable provenance is replaced.
+  }
+  provenance.thoughtform = { origin: 'import' };
+  if (markdownWritten) provenance.markdown = { origin: 'import' };
+  return JSON.stringify(provenance);
+}
 
 export interface UpsertResult {
   inserted: number;
@@ -17,7 +32,7 @@ export interface UpsertResult {
 
 /**
  * Convert a ThoughtFormV1 to the raw text used for embedding generation.
- * Concatenates rawText + entity values, matching the Python sidecar logic.
+ * Concatenates rawText + entity values.
  */
 export function extractEmbeddingText(tf: ThoughtFormV1): string {
   const parts: string[] = [];
@@ -65,6 +80,7 @@ export async function upsertThoughtforms(
         tags: JSON.stringify(tags),
         thoughtform: JSON.stringify(tf),
         markdown: tf.rawText ?? existing.markdown,
+        provenance: importedProvenance(existing.provenance, tf.rawText !== undefined),
       });
       updated++;
     } else {
@@ -80,6 +96,7 @@ export async function upsertThoughtforms(
         markdown: tf.rawText ?? null,
         thoughtform: JSON.stringify(tf),
         embedding: null,
+        provenance: importedProvenance(undefined, tf.rawText !== undefined),
       };
       await adapter.insertConcept(row);
       inserted++;
@@ -98,7 +115,7 @@ export async function upsertThoughtforms(
  * Extract tags from a ThoughtForm, merging with any existing tags.
  */
 function extractTags(tf: ThoughtFormV1, existingTagsJson: string): string[] {
-  const existing: string[] = JSON.parse(existingTagsJson) as string[];
+  const existing = parseTags(existingTagsJson);
   const entityTypes = tf.entities.map(e => e.type);
   return [...new Set([...existing, ...entityTypes])];
 }

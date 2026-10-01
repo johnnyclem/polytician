@@ -1,67 +1,65 @@
-version: "3.9"
+# Polytician over HTTP with Postgres + pgvector.
+#
+#   export POSTGRES_PASSWORD=$(openssl rand -hex 24)
+#   export POLYTICIAN_HTTP_TOKEN=$(openssl rand -base64 32)
+#   docker compose up -d
+#
+# MCP endpoint: http://127.0.0.1:8788/mcp with "Authorization: Bearer $POLYTICIAN_HTTP_TOKEN".
+# Nothing is published beyond 127.0.0.1, and Postgres is not published at all.
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     environment:
       POSTGRES_DB: polytician
       POSTGRES_USER: polytician
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U polytician"]
+      test: ["CMD-SHELL", "pg_isready -U polytician -d polytician"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
 
-  polytician-1:
+  polytician:
     build: .
+    image: polytician:3.0.0
     environment:
       POLYTICIAN_DB_BACKEND: postgres
-      POLYTICIAN_POSTGRES_URL: postgresql://polytician:${POSTGRES_PASSWORD:-changeme}@postgres:5432/polytician
-      POLYTICIAN_HEALTH_PORT: "8787"
-      POLYTICIAN_SIDECAR_URL: http://sidecar:5001
-      POLYTICIAN_NODE_ID: node-1
+      # URL-encode the password if it contains characters other than [A-Za-z0-9].
+      POLYTICIAN_POSTGRES_URL: postgresql://polytician:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/polytician
+      POLYTICIAN_HTTP_TOKEN: ${POLYTICIAN_HTTP_TOKEN:?set POLYTICIAN_HTTP_TOKEN (32+ characters)}
+      POLYTICIAN_HTTP_ALLOWED_HOSTS: localhost,127.0.0.1
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8788:8788"
+    volumes:
+      # Embedding model cache.
+      - polytician-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
-      sidecar:
-        condition: service_healthy
-
-  polytician-2:
-    build: .
-    environment:
-      POLYTICIAN_DB_BACKEND: postgres
-      POLYTICIAN_POSTGRES_URL: postgresql://polytician:${POSTGRES_PASSWORD:-changeme}@postgres:5432/polytician
-      POLYTICIAN_HEALTH_PORT: "8788"
-      POLYTICIAN_SIDECAR_URL: http://sidecar:5001
-      POLYTICIAN_NODE_ID: node-2
-    ports:
-      - "8788:8788"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      sidecar:
-        condition: service_healthy
-
-  sidecar:
-    build: ./python-sidecar
-    environment:
-      SIDECAR_PORT: "5001"
-      EMBEDDING_MODEL: all-MiniLM-L6-v2
-    ports:
-      - "5001:5001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
-      interval: 10s
+      # The image has no curl; node is always there.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8788/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
 
 volumes:
   pgdata:
+  polytician-data:

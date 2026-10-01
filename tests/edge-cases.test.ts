@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
-// Mock @xenova/transformers
-vi.mock('@xenova/transformers', () => {
+// Mock @huggingface/transformers
+vi.mock('@huggingface/transformers', () => {
   const mockPipeline = async (text: string, _options?: Record<string, unknown>) => {
     const hash = Array.from(text).reduce((acc, c) => acc + c.charCodeAt(0), 0);
     const data = new Float32Array(VECTOR_DIMENSION);

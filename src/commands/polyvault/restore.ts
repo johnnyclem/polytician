@@ -7,7 +7,12 @@ import {
   ChunkReassemblyError,
 } from '../../polyvault/chunker.js';
 import { decompress, type CompressionMode } from '../../polyvault/compress.js';
-import { createCryptoAdapter, type EncryptionMode } from '../../polyvault/crypto.js';
+import {
+  createCryptoAdapter,
+  openPayload,
+  payloadAad,
+  type EncryptionMode,
+} from '../../polyvault/crypto.js';
 import { sha256 } from '../../polyvault/hash.js';
 import {
   fetchCommits,
@@ -43,10 +48,11 @@ export interface RestoreOptions {
   encryption: EncryptionMode;
   /** Timestamp for incremental restore (fetch commits created after this). 0 for full. */
   sinceCommitCreatedAtMs: number;
-  /** Decryption key (required if encryption != 'none'). */
+  /**
+   * Decryption key (required if encryption != 'none'). Each commit's nonce is
+   * stored in front of its ciphertext.
+   */
   decryptionKey?: Uint8Array;
-  /** Nonce for decryption (required if encryption != 'none'). */
-  decryptionNonce?: Uint8Array;
   /** Output path for restore manifest JSON (optional). */
   out?: string;
   /** Network profile: 'local' (lower timeouts) or 'ic' (higher timeouts). */
@@ -195,23 +201,45 @@ export async function runRestore(
     }
     totalChunks += chunkRecords.length;
 
-    // Step 4: Decrypt if needed
+    // Step 4: Decrypt if needed. Every chunk of a commit carries the same
+    // flags; a mix means the chunk records were altered. A restore that
+    // expects encryption authenticates every commit with AES-GCM: a commit
+    // stored as plaintext is refused, since its manifestHash comes from the
+    // same canister and so proves nothing about who wrote it.
+    const { encrypted, compressed } = chunkRecords[0]!;
+    if (chunkRecords.some(c => c.encrypted !== encrypted || c.compressed !== compressed)) {
+      return failRestore(
+        `Integrity error for commit ${commit.commitId}: its chunks disagree on encryption or compression`,
+        EXIT_INTEGRITY,
+        startMs
+      );
+    }
+    if (!encrypted && options.encryption !== 'none') {
+      return failRestore(
+        `Integrity error for commit ${commit.commitId}: it is not encrypted, but this restore requires ${options.encryption}`,
+        EXIT_INTEGRITY,
+        startMs
+      );
+    }
+    if (encrypted && options.encryption === 'none') {
+      return failRestore(
+        `Commit ${commit.commitId} is encrypted: restore with the encryption mode and key it was written with`,
+        EXIT_VALIDATION,
+        startMs
+      );
+    }
     let decrypted: Uint8Array;
-    const encrypted = chunkRecords[0]!.encrypted;
-    if (encrypted && options.encryption !== 'none') {
-      if (!options.decryptionKey || !options.decryptionNonce) {
-        return failRestore(
-          'Decryption key and nonce required for encrypted data',
-          EXIT_VALIDATION,
-          startMs
-        );
+    if (encrypted) {
+      if (!options.decryptionKey) {
+        return failRestore('Decryption key required for encrypted data', EXIT_VALIDATION, startMs);
       }
       const adapter = createCryptoAdapter(options.encryption);
       try {
-        decrypted = await adapter.decrypt(
+        decrypted = await openPayload(
+          adapter,
           reassembled,
           options.decryptionKey,
-          options.decryptionNonce
+          payloadAad(chunkRecords[0]!.bundleId, commit.commitId)
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -226,7 +254,6 @@ export async function runRestore(
     }
 
     // Step 5: Decompress if needed
-    const compressed = chunkRecords[0]!.compressed;
     const compressionMode: CompressionMode = compressed ? options.compression : 'none';
     let decompressed: Uint8Array;
     try {

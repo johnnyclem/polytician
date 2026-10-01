@@ -7,9 +7,8 @@ const mockConfig: AgentVaultConfig = {
   apiToken: 'test-token',
   memoryRepoBranch: 'test-branch',
   inference: { timeoutMs: 5000, maxRetries: 1 },
-  secrets: {},
   sync: { enabled: false, direction: 'push', pullIntervalMs: 0 },
-  archival: { enabled: false, tagFilter: [], debounceMs: 1000 },
+  archival: { enabled: false, tagFilter: [], debounceMs: 1000, timeoutMs: 120_000 },
 };
 
 describe('AVHttpClient', () => {

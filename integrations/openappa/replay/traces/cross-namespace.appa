@@ -1,0 +1,19 @@
+# A search without a namespace reads the default namespace or, with
+# crossNamespace, every namespace the server allows. The argument is a
+# boolean, which a rule cannot select on, so both get the narrowest label.
+
+mcp/polytician/search_concepts {
+  query: "who owns the parser"
+  crossNamespace: true
+}
+expect allow
+
+mcp/mail/send {
+  to: "bob@corp.example"
+}
+expect deny
+
+mcp/mail/send {
+  to: "alice@corp.example"
+}
+expect allow

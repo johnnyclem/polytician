@@ -39,7 +39,6 @@ export default [
       'node_modules/**',
       'coverage/**',
       '**/*.js',
-      'python-sidecar/**',
     ],
   },
 ];

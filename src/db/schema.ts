@@ -10,6 +10,12 @@ export const concepts = sqliteTable('concepts', {
   markdown: text('markdown'),
   thoughtform: text('thoughtform'),
   embedding: blob('embedding', { mode: 'buffer' }),
+  provenance: text('provenance', { mode: 'json' })
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default({}),
+  assertionStatus: text('assertion_status'),
+  ledgerRef: text('ledger_ref'),
 });
 
 export type ConceptRow = typeof concepts.$inferSelect;

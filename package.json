@@ -1,6 +1,6 @@
 {
   "name": "polytician",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Local-first MCP server for shared semantic memory — store, retrieve, and convert concepts across vectors, markdown, and ThoughtForm representations",
   "type": "module",
   "main": "dist/index.js",
@@ -11,10 +11,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "lint": "eslint src/**/*.ts",
-    "lint:fix": "eslint src/**/*.ts --fix",
-    "format": "prettier --write src/**/*.ts",
-    "format:check": "prettier --check src/**/*.ts",
+    "lint": "eslint \"src/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
     "quality": "npm run lint && npm run typecheck && npm run format:check",
     "quality:fix": "npm run lint:fix && npm run format",
     "typecheck": "tsc --noEmit",
@@ -22,13 +22,14 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run quality && npm run test && npm run build",
     "audit:fix": "npm audit fix",
-    "security:scan": "npm audit --audit-level=moderate",
-    "agentvault-sync": "tsx bin/agentvault-sync.ts"
+    "security:scan": "npm audit --omit=dev --audit-level=high",
+    "agentvault-sync": "tsx bin/agentvault-sync.ts",
+    "appa:check": "node scripts/appa-check.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.0",
-    "@xenova/transformers": "^2.17.0",
-    "better-sqlite3": "^11.0.0",
+    "@huggingface/transformers": "^4.3.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "better-sqlite3": "^13.0.3",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.19.0",
     "sqlite-vec": "^0.1.7-alpha.2",
@@ -36,7 +37,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.18.0",
     "@types/uuid": "^10.0.0",
@@ -52,14 +53,11 @@
     "vitest": "^4.1.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22"
   },
   "overrides": {
     "esbuild": ">=0.25.0",
-    "minimatch": ">=3.1.4",
-    "@modelcontextprotocol/sdk": {
-      "zod": ">=3.25.0"
-    }
+    "minimatch": ">=3.1.4"
   },
   "files": [
     "dist",

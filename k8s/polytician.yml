@@ -1,3 +1,10 @@
+# Polytician MCP over Streamable HTTP: http://polytician.polytician.svc:8788/mcp
+#
+# Build and push the image (docker build -t <registry>/polytician:3.0.0 .), set
+# `image` below, and create the bearer-token secret clients will present:
+#   kubectl -n polytician create secret generic polytician-http \
+#     --from-literal=token="$(openssl rand -base64 32)"
+# Clients must run in pods labelled polytician-client: "true" (see networkpolicy.yml).
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,8 +14,9 @@ spec:
   selector:
     app: polytician
   ports:
-    - port: 8787
-      targetPort: 8787
+    - name: http
+      port: 8788
+      targetPort: 8788
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -16,7 +24,7 @@ metadata:
   name: polytician
   namespace: polytician
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
       app: polytician
@@ -25,9 +33,18 @@ spec:
       labels:
         app: polytician
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The node image's "node" user.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: polytician
-          image: polytician:latest
+          image: polytician:3.0.0
           env:
             - name: POLYTICIAN_DB_BACKEND
               value: postgres
@@ -36,33 +53,56 @@ spec:
                 secretKeyRef:
                   name: postgres-secret
                   key: POSTGRES_URL
-            - name: POLYTICIAN_HEALTH_PORT
-              value: "8787"
-            - name: POLYTICIAN_SIDECAR_URL
-              value: http://sidecar:5001
+            - name: POLYTICIAN_HTTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: polytician-http
+                  key: token
+            # Host names clients use to reach the service (DNS-rebinding check).
+            - name: POLYTICIAN_HTTP_ALLOWED_HOSTS
+              value: polytician,polytician.polytician,polytician.polytician.svc,polytician.polytician.svc.cluster.local
             - name: NODE_ENV
               value: production
           ports:
-            - containerPort: 8787
+            - name: http
+              containerPort: 8788
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # Embedding model cache (downloaded on first use).
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          # Readiness checks the database; liveness only that the process answers,
+          # so a database outage does not restart every pod.
           readinessProbe:
             httpGet:
               path: /health
-              port: 8787
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /health
-              port: 8787
+              path: /health/live
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 30
           resources:
             requests:
-              memory: 128Mi
+              memory: 256Mi
               cpu: 100m
             limits:
-              memory: 512Mi
-              cpu: 500m
+              memory: 1Gi
+              cpu: "1"
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

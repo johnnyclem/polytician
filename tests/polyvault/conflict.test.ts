@@ -2,13 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveConflict,
   mergeThoughtformSets,
-  computeSkewSafeLowerBound,
   type ConflictResolutionOptions,
 } from '../../src/polyvault/conflict.js';
 import {
   computeRemoteDelta,
   rebase,
   type RebaseInput,
+  type RemoteCommit,
 } from '../../src/polyvault/rebase.js';
 import type { ThoughtFormV1 } from '../../src/schemas/thoughtform.js';
 import { SCHEMA_VERSION_V1 } from '../../src/schemas/thoughtform.js';
@@ -42,6 +42,14 @@ const defaultOptions: ConflictResolutionOptions = {
 // ==================== resolveConflict ====================
 
 describe('resolveConflict', () => {
+  it('equal contentHash over different content is a real conflict (stale producer hash)', () => {
+    const local = makeTf({ id: 'tf_1', rawText: 'mine', metadata: { updatedAtMs: 2000 } });
+    const remote = makeTf({ id: 'tf_1', rawText: 'theirs', metadata: { updatedAtMs: 1000 } });
+    const result = resolveConflict(local, remote, defaultOptions);
+    expect(result.outcome).toBe('local');
+    expect(result.loser).toBe(remote);
+  });
+
   it('identical contentHash → no-conflict outcome', () => {
     const local = makeTf({ id: 'tf_1', metadata: { contentHash: 'abc'.padEnd(64, '0') } });
     const remote = makeTf({ id: 'tf_1', metadata: { contentHash: 'abc'.padEnd(64, '0') } });
@@ -259,112 +267,90 @@ describe('mergeThoughtformSets', () => {
   });
 });
 
-// ==================== computeSkewSafeLowerBound ====================
-
-describe('computeSkewSafeLowerBound', () => {
-  it('uses min of lastSyncedAt and observedRemoteMax minus skew window', () => {
-    const bound = computeSkewSafeLowerBound(10_000, 8_000, 5_000);
-    // min(10000, 8000) = 8000, minus 5000 = 3000
-    expect(bound).toBe(3_000);
-  });
-
-  it('never goes below zero', () => {
-    const bound = computeSkewSafeLowerBound(1000, 2000, 5000);
-    expect(bound).toBe(0);
-  });
-
-  it('defaults skew window to 300_000ms (5 min)', () => {
-    const bound = computeSkewSafeLowerBound(1_000_000, 1_000_000);
-    expect(bound).toBe(700_000);
-  });
-
-  it('clock-skew window prevents missed updates in simulated skew (AC)', () => {
-    // Simulate: local thinks sync was at t=10000, remote clock is 2min ahead
-    // Remote actually updated record at t=9500 (which is "before" local sync cursor)
-    const lastSyncedAtMs = 10_000;
-    const observedRemoteMax = 12_000; // remote clock ahead
-    const skewWindowMs = 5_000;
-    const bound = computeSkewSafeLowerBound(lastSyncedAtMs, observedRemoteMax, skewWindowMs);
-    // min(10000, 12000) = 10000, minus 5000 = 5000
-    // Record at t=9500 > bound(5000), so it IS captured
-    expect(bound).toBe(5_000);
-    expect(9500 > bound).toBe(true); // record not missed
-  });
-
-  it('without skew window, update IS missed', () => {
-    // Same scenario but no skew window
-    const bound = computeSkewSafeLowerBound(10_000, 12_000, 0);
-    expect(bound).toBe(10_000);
-    // Record at t=9500 < bound(10000), so it IS missed without the skew window
-    expect(9500 > bound).toBe(false);
-  });
-});
-
 // ==================== computeRemoteDelta ====================
 
+const DAY = 86_400_000;
+const T0 = 1_730_000_000_000;
+
+function commit(commitId: string, createdAtMs: number, thoughtforms: ThoughtFormV1[]): RemoteCommit {
+  return { commitId, createdAtMs, thoughtforms };
+}
+
 describe('computeRemoteDelta', () => {
-  it('filters remote forms to those updated after skew-safe lower bound', () => {
-    const remoteForms = [
-      makeTf({ id: 'tf_old', metadata: { updatedAtMs: 1000 } }),
-      makeTf({ id: 'tf_new', metadata: { updatedAtMs: 9000 } }),
-      makeTf({ id: 'tf_newer', metadata: { updatedAtMs: 15000 } }),
+  it('takes every form from commits after the cursor, whatever their updatedAtMs', () => {
+    const commits = [
+      commit('cmt_2', T0 + 2, [makeTf({ id: 'tf_old_edit', metadata: { updatedAtMs: 1 } })]),
+      commit('cmt_1', T0 + 1, [makeTf({ id: 'tf_seen', metadata: { updatedAtMs: T0 } })]),
     ];
-    const { delta, lowerBound } = computeRemoteDelta(remoteForms, 10_000, 10_000, 5_000);
-    expect(lowerBound).toBe(5_000);
-    expect(delta).toHaveLength(2);
-    expect(delta.map((tf) => tf.id)).toEqual(['tf_new', 'tf_newer']);
+    const { delta, applied } = computeRemoteDelta(commits, { commitId: 'cmt_1', createdAtMs: T0 + 1 });
+    expect(applied.map(c => c.commitId)).toEqual(['cmt_2']);
+    expect(delta.map(tf => tf.id)).toEqual(['tf_old_edit']);
   });
 
-  it('returns empty delta when no remote forms are newer', () => {
-    const remoteForms = [
-      makeTf({ id: 'tf_old', metadata: { updatedAtMs: 1000 } }),
+  it('applies every commit on the first rebase', () => {
+    const commits = [
+      commit('cmt_1', T0 + 1, [makeTf({ id: 'tf_1' })]),
+      commit('cmt_2', T0 + 2, [makeTf({ id: 'tf_2' })]),
     ];
-    const { delta } = computeRemoteDelta(remoteForms, 10_000, 10_000, 5_000);
-    expect(delta).toHaveLength(0);
+    expect(computeRemoteDelta(commits, null).delta).toHaveLength(2);
   });
 
-  it('returns all remote forms when lower bound is 0', () => {
-    const remoteForms = [
-      makeTf({ id: 'tf_1', metadata: { updatedAtMs: 1 } }),
-      makeTf({ id: 'tf_2', metadata: { updatedAtMs: 2 } }),
+  it('orders commits with the same createdAtMs by commitId', () => {
+    const commits = [
+      commit('cmt_b', T0, [makeTf({ id: 'tf_b' })]),
+      commit('cmt_a', T0, [makeTf({ id: 'tf_a' })]),
     ];
-    const { delta } = computeRemoteDelta(remoteForms, 100, 100, 200);
-    // lower bound = max(0, min(100,100) - 200) = 0
-    expect(delta).toHaveLength(2);
+    const { applied } = computeRemoteDelta(commits, { commitId: 'cmt_a', createdAtMs: T0 });
+    expect(applied.map(c => c.commitId)).toEqual(['cmt_b']);
+  });
+
+  it('resolves an id carried by several new commits with the updatedAt rules', () => {
+    const commits = [
+      commit('cmt_1', T0 + 1, [makeTf({ id: 'tf_x', metadata: { updatedAtMs: 5000, contentHash: 'b'.repeat(64) } })]),
+      commit('cmt_2', T0 + 2, [makeTf({ id: 'tf_x', metadata: { updatedAtMs: 3000, contentHash: 'c'.repeat(64) } })]),
+    ];
+    const { delta } = computeRemoteDelta(commits, null);
+    expect(delta).toHaveLength(1);
+    expect(delta[0]!.metadata.updatedAtMs).toBe(5000);
   });
 });
 
 // ==================== rebase ====================
 
 describe('rebase', () => {
-  it('merges remote delta into local set', () => {
-    const input: RebaseInput = {
-      localForms: [makeTf({ id: 'tf_local', metadata: { updatedAtMs: 5000, contentHash: 'a'.repeat(64) } })],
-      remoteForms: [
-        makeTf({ id: 'tf_remote', metadata: { updatedAtMs: 8000, contentHash: 'b'.repeat(64) } }),
-        makeTf({ id: 'tf_old_remote', metadata: { updatedAtMs: 100, contentHash: 'c'.repeat(64) } }),
-      ],
-      localBaseUpdatedAtMs: 1000,
-      observedRemoteMaxUpdatedAtMs: 8000,
-      options: { policy: 'updatedAt', skewWindowMs: 500 },
-    };
-    const result = rebase(input);
-    // lower bound = min(1000, 8000) - 500 = 500
-    // tf_remote (8000 > 500) → included in delta
-    // tf_old_remote (100 < 500) → excluded from delta
-    expect(result.remoteDeltaCount).toBe(1);
-    expect(result.merged).toHaveLength(2); // tf_local + tf_remote
-    expect(result.newBaseUpdatedAtMs).toBe(8000);
-    expect(result.skewSafeLowerBound).toBe(500);
+  it('applies offline edits that reach the canister late (POLY-12)', () => {
+    // Device A rebased after commit cmt_1 (a note edited a day after T0).
+    // Device B was offline: it edited `shared` and wrote `b_note` around T0,
+    // and its commit reached the canister only afterwards.
+    const shared = makeTf({ id: 'shared', rawText: 'v1', metadata: { updatedAtMs: T0, contentHash: 'a'.repeat(64) } });
+    const recent = makeTf({ id: 'recent', metadata: { updatedAtMs: T0 + DAY, contentHash: 'c'.repeat(64) } });
+    const commits = [
+      commit('cmt_1', T0 + DAY, [recent]),
+      commit('cmt_2', T0 + DAY + 60_000, [
+        makeTf({ id: 'shared', rawText: 'B edit', metadata: { updatedAtMs: T0 + 1000, contentHash: 'b'.repeat(64) } }),
+        makeTf({ id: 'b_note', metadata: { updatedAtMs: T0 + 2000, contentHash: 'd'.repeat(64) } }),
+      ]),
+    ];
+    const result = rebase({
+      localForms: [shared, recent],
+      remoteCommits: commits,
+      lastApplied: { commitId: 'cmt_1', createdAtMs: T0 + DAY },
+      options: { policy: 'updatedAt' },
+    });
+    expect(result.remoteDeltaCount).toBe(2);
+    expect(result.merged.map(tf => tf.id).sort()).toEqual(['b_note', 'recent', 'shared']);
+    expect(result.merged.find(tf => tf.id === 'shared')!.rawText).toBe('B edit');
+    expect(result.lastApplied).toEqual({ commitId: 'cmt_2', createdAtMs: T0 + DAY + 60_000 });
   });
 
   it('handles conflicting IDs during rebase', () => {
     const input: RebaseInput = {
       localForms: [makeTf({ id: 'tf_shared', metadata: { updatedAtMs: 5000, contentHash: 'a'.repeat(64) } })],
-      remoteForms: [makeTf({ id: 'tf_shared', metadata: { updatedAtMs: 7000, contentHash: 'b'.repeat(64) } })],
-      localBaseUpdatedAtMs: 1000,
-      observedRemoteMaxUpdatedAtMs: 7000,
-      options: { policy: 'updatedAt', skewWindowMs: 500 },
+      remoteCommits: [
+        commit('cmt_1', T0, [makeTf({ id: 'tf_shared', metadata: { updatedAtMs: 7000, contentHash: 'b'.repeat(64) } })]),
+      ],
+      lastApplied: null,
+      options: { policy: 'updatedAt' },
     };
     const result = rebase(input);
     expect(result.merged).toHaveLength(1);
@@ -373,49 +359,45 @@ describe('rebase', () => {
     expect(result.merged[0]!.metadata.updatedAtMs).toBe(7000);
   });
 
-  it('preserves local forms not in remote delta', () => {
+  it('preserves local forms not in the new commits', () => {
     const input: RebaseInput = {
       localForms: [
         makeTf({ id: 'tf_untouched', metadata: { updatedAtMs: 5000, contentHash: 'a'.repeat(64) } }),
         makeTf({ id: 'tf_conflicting', metadata: { updatedAtMs: 3000, contentHash: 'c'.repeat(64) } }),
       ],
-      remoteForms: [
-        makeTf({ id: 'tf_conflicting', metadata: { updatedAtMs: 6000, contentHash: 'd'.repeat(64) } }),
+      remoteCommits: [
+        commit('cmt_1', T0, [makeTf({ id: 'tf_conflicting', metadata: { updatedAtMs: 6000, contentHash: 'd'.repeat(64) } })]),
       ],
-      localBaseUpdatedAtMs: 1000,
-      observedRemoteMaxUpdatedAtMs: 6000,
-      options: { policy: 'updatedAt', skewWindowMs: 500 },
-    };
-    const result = rebase(input);
-    expect(result.merged).toHaveLength(2);
-    const ids = result.merged.map((tf) => tf.id);
-    expect(ids).toContain('tf_untouched');
-    expect(ids).toContain('tf_conflicting');
-    // tf_conflicting resolved as remote winner (6000 > 3000)
-    const conflicting = result.merged.find((tf) => tf.id === 'tf_conflicting')!;
-    expect(conflicting.metadata.updatedAtMs).toBe(6000);
-  });
-
-  it('empty remote delta produces unchanged local set', () => {
-    const input: RebaseInput = {
-      localForms: [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5000 } })],
-      remoteForms: [],
-      localBaseUpdatedAtMs: 10_000,
-      observedRemoteMaxUpdatedAtMs: 10_000,
+      lastApplied: null,
       options: { policy: 'updatedAt' },
     };
     const result = rebase(input);
-    expect(result.merged).toHaveLength(1);
-    expect(result.remoteDeltaCount).toBe(0);
-    expect(result.conflicts).toHaveLength(0);
+    expect(result.merged.map(tf => tf.id).sort()).toEqual(['tf_conflicting', 'tf_untouched']);
+    expect(result.merged.find(tf => tf.id === 'tf_conflicting')!.metadata.updatedAtMs).toBe(6000);
   });
 
-  it('rebase with preferLocal preserves local on conflict within skew', () => {
+  it('with no new commits, leaves the local set and the cursor unchanged', () => {
+    const cursor = { commitId: 'cmt_1', createdAtMs: T0 };
+    const result = rebase({
+      localForms: [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5000 } })],
+      remoteCommits: [commit('cmt_1', T0, [makeTf({ id: 'tf_remote' })])],
+      lastApplied: cursor,
+      options: { policy: 'updatedAt' },
+    });
+    expect(result.merged).toHaveLength(1);
+    expect(result.remoteDeltaCount).toBe(0);
+    expect(result.appliedCommitCount).toBe(0);
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.lastApplied).toEqual(cursor);
+  });
+
+  it('rebase with prefer local preserves local on conflict within skew', () => {
     const input: RebaseInput = {
       localForms: [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5000, contentHash: 'a'.repeat(64) } })],
-      remoteForms: [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5100, contentHash: 'b'.repeat(64) } })],
-      localBaseUpdatedAtMs: 1000,
-      observedRemoteMaxUpdatedAtMs: 5100,
+      remoteCommits: [
+        commit('cmt_1', T0, [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5100, contentHash: 'b'.repeat(64) } })]),
+      ],
+      lastApplied: null,
       options: { policy: 'updatedAt', prefer: 'local', skewWindowMs: 300_000 },
     };
     const result = rebase(input);

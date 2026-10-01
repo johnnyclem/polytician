@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { vi } from 'vitest';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
-// Mock @xenova/transformers
-vi.mock('@xenova/transformers', () => {
+// Mock @huggingface/transformers
+vi.mock('@huggingface/transformers', () => {
   const mockPipeline = async (text: string, _options?: Record<string, unknown>) => {
     const hash = Array.from(text).reduce((acc, c) => acc + c.charCodeAt(0), 0);
     const data = new Float32Array(VECTOR_DIMENSION);
@@ -26,6 +27,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../src/server.js';
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
+import { resetConfig } from '../src/config.js';
 import type { ThoughtForm } from '../src/types/thoughtform.js';
 
 let client: Client;
@@ -75,19 +77,29 @@ describe('MCP Server — Tool integration', () => {
 
   // --- Tool discovery ---
 
+  it('reports the package version as its MCP server version', async () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+    expect(client.getServerVersion()).toMatchObject({ name: 'polytician', version: pkg.version });
+  });
+
   it('should list all expected tools', async () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     expect(names).toEqual([
-      'agentvault_backup',
       'batch_save_concepts',
       'convert_concept',
       'delete_concept',
       'embed_text',
+      'export_backup',
       'get_stats',
       'health_check',
+      'import_backup',
+      'list_backups',
       'list_concepts',
       'read_concept',
+      'reembed_concepts',
       'save_concept',
       'search_concepts',
     ]);
@@ -179,10 +191,10 @@ describe('MCP Server — Tool integration', () => {
     await callTool('convert_concept', { id, from: 'markdown', to: 'vector' });
 
     // Search
-    const results = await callTool('search_concepts', {
+    const { results } = await callTool('search_concepts', {
       query: 'Marie Curie radioactivity',
       k: 5,
-    }) as Array<{ id: string; representations: { vector: boolean; markdown: boolean; thoughtform: boolean } }>;
+    }) as { results: Array<{ id: string; representations: { vector: boolean; markdown: boolean; thoughtform: boolean } }> };
 
     expect(Array.isArray(results)).toBe(true);
     const found = results.find(r => r.id === id);
@@ -357,11 +369,11 @@ describe('MCP Server — Tool integration', () => {
     });
     await callTool('save_concept', { namespace: 'agent-b', markdown: '# Agent B data' });
 
-    const results = await callTool('search_concepts', {
+    const { results } = await callTool('search_concepts', {
       query: 'Agent data',
       namespace: 'agent-a',
       k: 10,
-    }) as Array<{ namespace: string }>;
+    }) as { results: Array<{ namespace: string }> };
 
     expect(Array.isArray(results)).toBe(true);
     for (const r of results) {
@@ -369,7 +381,14 @@ describe('MCP Server — Tool integration', () => {
     }
   });
 
-  it('should allow cross-namespace search via MCP', async () => {
+  it('should allow cross-namespace search via MCP when the operator enables it', async () => {
+    process.env['POLYTICIAN_NAMESPACES'] = '*';
+    resetConfig();
+    onTestFinished(() => {
+      delete process.env['POLYTICIAN_NAMESPACES'];
+      resetConfig();
+    });
+
     const savedA = await callTool('save_concept', {
       namespace: 'agent-a',
       markdown: '# Cross namespace test A',
@@ -382,11 +401,11 @@ describe('MCP Server — Tool integration', () => {
     }) as { id: string };
     await callTool('convert_concept', { id: savedB.id, from: 'markdown', to: 'vector' });
 
-    const results = await callTool('search_concepts', {
+    const { results } = await callTool('search_concepts', {
       query: 'Cross namespace test',
       crossNamespace: true,
       k: 10,
-    }) as Array<{ namespace: string }>;
+    }) as { results: Array<{ namespace: string }> };
 
     expect(Array.isArray(results)).toBe(true);
     const namespaces = new Set(results.map(r => r.namespace));

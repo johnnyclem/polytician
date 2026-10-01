@@ -3,7 +3,6 @@
  *
  * Wires the CLI backup/restore commands with:
  * - SQLite upsert (restore: write ThoughtForms to local concepts table)
- * - FAISS rebuild (restore: trigger sidecar to rebuild vector index)
  * - SQLite read (backup: read ThoughtForms from local concepts table)
  *
  * This module is the "PR11" integration layer that turns the individual
@@ -15,11 +14,6 @@ import { runBackup, type BackupOptions, type BackupResult } from './backup.js';
 import { runRestore, type RestoreOptions, type RestoreResult } from './restore.js';
 import { upsertThoughtforms, type UpsertResult } from '../../storage/sqlite-upsert.js';
 import { vaultLogger } from '../../polyvault/logger.js';
-import type {
-  FaissRebuildClient,
-  FaissRebuildMode,
-  FaissRebuildResult,
-} from '../../lib/polyvault/faiss-client.js';
 import type { DatabaseAdapter } from '../../db/adapter.js';
 import type { CanisterClient } from '../../lib/polyvault/upload.js';
 import type { RestoreClient } from '../../lib/polyvault/download.js';
@@ -27,41 +21,38 @@ import type { ThoughtFormV1 } from '../../schemas/thoughtform.js';
 
 // --- E2E Restore ---
 
-export interface RestoreE2EOptions extends RestoreOptions {
-  /** FAISS rebuild mode: 'replace' for full, 'upsert' for incremental. */
-  faissMode: FaissRebuildMode;
-}
+export type RestoreE2EOptions = RestoreOptions;
 
 export interface RestoreE2EResult {
   restore: RestoreResult;
   upsert: UpsertResult | null;
-  faiss: FaissRebuildResult | null;
 }
 
 /**
- * End-to-end restore: fetch from canister → write JSON → upsert SQLite → rebuild FAISS.
+ * End-to-end restore: fetch from canister → write JSON → upsert SQLite.
  *
  * Steps:
  * 1. Run the restore pipeline (fetch commits/chunks, reassemble, decrypt, decompress).
  * 2. Read the restored ThoughtForms from the output file.
  * 3. Upsert into the local SQLite concepts table (idempotent, local-first).
- * 4. Trigger FAISS index rebuild via the Python sidecar.
+ *
+ * Upserted concepts carry no vector; they become searchable once a vector is
+ * derived for them (for example by saving them again with autoEmbed).
  */
 export async function runRestoreE2E(
   client: RestoreClient,
   db: DatabaseAdapter,
-  faissClient: FaissRebuildClient | null,
   options: RestoreE2EOptions
 ): Promise<{ result: RestoreE2EResult; exitCode: number }> {
   const startMs = Date.now();
-  vaultLogger.info('restore-e2e.start', { mode: options.mode, faissMode: options.faissMode });
+  vaultLogger.info('restore-e2e.start', { mode: options.mode });
 
   // Step 1: Run restore pipeline
   const { result: restoreResult, exitCode } = await runRestore(client, options);
 
   if (exitCode !== 0 || restoreResult.status === 'error') {
     return {
-      result: { restore: restoreResult, upsert: null, faiss: null },
+      result: { restore: restoreResult, upsert: null },
       exitCode,
     };
   }
@@ -70,7 +61,7 @@ export async function runRestoreE2E(
   if (restoreResult.status === 'empty' || restoreResult.thoughtformCount === 0) {
     vaultLogger.info('restore-e2e.empty', { duration_ms: Date.now() - startMs });
     return {
-      result: { restore: restoreResult, upsert: null, faiss: null },
+      result: { restore: restoreResult, upsert: null },
       exitCode: 0,
     };
   }
@@ -87,7 +78,6 @@ export async function runRestoreE2E(
       result: {
         restore: restoreResult,
         upsert: null,
-        faiss: null,
         ...({ error: `Failed to read restored file: ${message}` } as Record<string, unknown>),
       } as RestoreE2EResult,
       exitCode: 2,
@@ -110,35 +100,10 @@ export async function runRestoreE2E(
       result: {
         restore: restoreResult,
         upsert: null,
-        faiss: null,
         ...({ error: `SQLite upsert failed: ${message}` } as Record<string, unknown>),
       } as RestoreE2EResult,
       exitCode: 2,
     };
-  }
-
-  // Step 4: Rebuild FAISS index (optional — skip if no sidecar)
-  let faissResult: FaissRebuildResult | null = null;
-  if (faissClient) {
-    try {
-      faissResult = await faissClient.rebuildIndex(thoughtforms, options.faissMode);
-      vaultLogger.info('restore-e2e.faiss.complete', {
-        mode: options.faissMode,
-        vectorCount: faissResult.vectorCount,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      vaultLogger.error('restore-e2e.faiss.failed', { errorMessage: message });
-      return {
-        result: {
-          restore: restoreResult,
-          upsert: upsertResult,
-          faiss: null,
-          ...({ error: `FAISS rebuild failed: ${message}` } as Record<string, unknown>),
-        } as RestoreE2EResult,
-        exitCode: 4,
-      };
-    }
   }
 
   vaultLogger.info('restore-e2e.complete', {
@@ -146,12 +111,11 @@ export async function runRestoreE2E(
     inserted: upsertResult.inserted,
     updated: upsertResult.updated,
     skipped: upsertResult.skipped,
-    faissVectors: faissResult?.vectorCount ?? 0,
     duration_ms: Date.now() - startMs,
   });
 
   return {
-    result: { restore: restoreResult, upsert: upsertResult, faiss: faissResult },
+    result: { restore: restoreResult, upsert: upsertResult },
     exitCode: 0,
   };
 }

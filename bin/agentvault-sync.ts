@@ -3,25 +3,33 @@
 /**
  * agentvault-sync CLI
  *
- * Top-level CLI for managing Polytician ↔ AgentVault synchronisation.
+ * Top-level CLI for managing Polytician backups and Polytician <-> AgentVault
+ * synchronisation.
  *
  * Subcommands:
- *   backup  — Export all concepts from the local database to a JSON file
- *   restore — Import concepts from a JSON backup file into the local database
+ *   backup  — Write a backup file (all namespaces unless --namespace is given)
+ *   restore — Restore concepts from a backup file
  *   sync    — Bidirectional sync with AgentVault memory_repo
  *
  * Usage:
- *   npx tsx bin/agentvault-sync.ts backup  [--out <path>] [--namespace <ns>]
- *   npx tsx bin/agentvault-sync.ts restore [--file <path>]
+ *   npx tsx bin/agentvault-sync.ts backup  [--out <path>] [--namespace <ns>] [--encrypt]
+ *   npx tsx bin/agentvault-sync.ts restore --file <path> [--namespace <ns>] [--on-conflict newer|overwrite|skip] [--reembed]
  *   npx tsx bin/agentvault-sync.ts sync    [--direction push|pull|bidirectional] [--namespace <ns>]
+ *
+ * Backups use the versioned JSONL format in src/backup/format.ts, the same
+ * files the export_backup / import_backup tools read and write.
  */
 
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { initializeDatabase, closeDatabase } from '../src/db/client.js';
-import { conceptService } from '../src/services/concept.service.js';
-import { getConfig, resetConfig } from '../src/config.js';
-import { logger } from '../src/logger.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { initializeDatabaseAsync, closeDatabase, getAdapter } from '../src/db/client.js';
+import { getConfig } from '../src/config.js';
+import {
+  exportBackup,
+  exportBackupTo,
+  importBackupBytes,
+  type ExportResult,
+} from '../src/services/backup.service.js';
+import type { RestoreConflictPolicy } from '../src/services/concept.service.js';
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
@@ -54,111 +62,72 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { subcommand, flags };
 }
 
+class UsageError extends Error {}
+
+/** Every concept id, in one namespace or (namespace undefined) in all of them. */
+async function listIds(namespace: string | undefined): Promise<string[]> {
+  const { rows } = await getAdapter().listConcepts({
+    limit: 2_147_483_647,
+    offset: 0,
+    namespace,
+  });
+  return rows.map(r => r.id);
+}
+
 // ---------------------------------------------------------------------------
 // backup
 // ---------------------------------------------------------------------------
 
 async function backup(flags: Record<string, string>): Promise<void> {
-  const namespace = flags['namespace'] ?? undefined;
-  const defaultFile = `polytician-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  const outPath = flags['out'] ?? join(process.cwd(), defaultFile);
+  const namespace = flags['namespace'];
+  const options = { namespaces: namespace ? [namespace] : ('*' as const) };
 
-  console.log(`[agentvault-sync] backup: exporting concepts${namespace ? ` (namespace: ${namespace})` : ''} ...`);
+  console.log(
+    `[agentvault-sync] backup: exporting ${namespace ? `namespace ${namespace}` : 'all namespaces'} ...`
+  );
+  // --encrypt is read by getConfig() (POLYTICIAN_ENCRYPT); without a key the export fails.
+  const result: ExportResult = flags['out']
+    ? await exportBackupTo(flags['out'], options)
+    : await exportBackup(options);
 
-  // Paginate through all concepts
-  const allConcepts: Array<Record<string, unknown>> = [];
-  const pageSize = 100;
-  let offset = 0;
-
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const page = await conceptService.list({ namespace, limit: pageSize, offset });
-    if (page.concepts.length === 0) break;
-
-    for (const summary of page.concepts) {
-      const full = await conceptService.read(summary.id);
-      allConcepts.push(full);
-    }
-
-    offset += page.concepts.length;
-    if (offset >= page.total) break;
-  }
-
-  const payload = {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    namespace: namespace ?? 'all',
-    conceptCount: allConcepts.length,
-    concepts: allConcepts,
-  };
-
-  const dir = join(outPath, '..');
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-
-  writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf-8');
-  console.log(`[agentvault-sync] backup: wrote ${allConcepts.length} concepts to ${outPath}`);
+  const counts = Object.entries(result.namespaces)
+    .map(([ns, n]) => `${ns}=${n}`)
+    .join(', ');
+  console.log(
+    `[agentvault-sync] backup: wrote ${result.conceptCount} concepts${counts ? ` (${counts})` : ''} to ${result.path}`
+  );
+  console.log(
+    `[agentvault-sync] backup: ${result.encrypted ? `encrypted with key ${result.keyId}` : 'not encrypted'}, sha256 ${result.sha256}`
+  );
 }
 
 // ---------------------------------------------------------------------------
 // restore
 // ---------------------------------------------------------------------------
 
-interface BackupPayload {
-  version: number;
-  concepts: Array<{
-    id?: string;
-    namespace?: string;
-    markdown?: string | null;
-    thoughtform?: unknown;
-    embedding?: number[] | null;
-    tags?: string[];
-  }>;
-}
-
 async function restore(flags: Record<string, string>): Promise<void> {
   const filePath = flags['file'];
-  if (!filePath) {
-    console.error('[agentvault-sync] restore: --file <path> is required');
-    process.exit(1);
-  }
+  if (!filePath) throw new UsageError('restore: --file <path> is required');
+  if (!existsSync(filePath)) throw new UsageError(`restore: file not found: ${filePath}`);
 
-  if (!existsSync(filePath)) {
-    console.error(`[agentvault-sync] restore: file not found: ${filePath}`);
-    process.exit(1);
+  const onConflict = flags['on-conflict'];
+  if (onConflict !== undefined && !['newer', 'overwrite', 'skip'].includes(onConflict)) {
+    throw new UsageError('restore: --on-conflict must be newer, overwrite or skip');
   }
 
   console.log(`[agentvault-sync] restore: reading ${filePath} ...`);
-  const raw = readFileSync(filePath, 'utf-8');
-  const payload = JSON.parse(raw) as BackupPayload;
+  const result = await importBackupBytes(readFileSync(filePath), {
+    namespace: flags['namespace'],
+    onConflict: onConflict as RestoreConflictPolicy | undefined,
+    reembed: flags['reembed'] === 'true',
+  });
 
-  if (!payload.concepts || !Array.isArray(payload.concepts)) {
-    console.error('[agentvault-sync] restore: invalid backup file — missing "concepts" array');
-    process.exit(1);
+  console.log(
+    `[agentvault-sync] restore: imported ${result.inserted + result.updated} concepts (${result.inserted} new, ${result.updated} replaced), skipped ${result.skipped.length}`
+  );
+  for (const s of result.skipped) {
+    console.log(`[agentvault-sync] restore: skipped ${s.namespace}/${s.id}: ${s.reason}`);
   }
-
-  let imported = 0;
-  let skipped = 0;
-
-  for (const entry of payload.concepts) {
-    try {
-      await conceptService.save({
-        id: entry.id,
-        namespace: entry.namespace,
-        markdown: entry.markdown ?? undefined,
-        thoughtform: entry.thoughtform as undefined,
-        embedding: entry.embedding ?? undefined,
-        tags: entry.tags ?? [],
-      });
-      imported++;
-    } catch (err) {
-      logger.warn('restore: failed to import concept', { id: entry.id, error: String(err) });
-      skipped++;
-    }
-  }
-
-  console.log(`[agentvault-sync] restore: imported ${imported} concepts, skipped ${skipped}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,59 +138,67 @@ async function sync(flags: Record<string, string>): Promise<void> {
   const config = getConfig();
 
   if (!config.agentVault) {
-    console.error(
-      '[agentvault-sync] sync: AgentVault integration is not configured.\n' +
-      'Set agentVault config in .polytician.json or via POLYTICIAN_AV_API_URL / POLYTICIAN_AV_API_TOKEN env vars.'
+    throw new UsageError(
+      'sync: AgentVault integration is not configured. Configure agentVault in the config file, or set POLYTICIAN_AV_API_URL / POLYTICIAN_AV_API_TOKEN.'
     );
-    process.exit(1);
   }
 
   const direction = (flags['direction'] ?? config.agentVault.sync.direction ?? 'bidirectional') as
-    'push' | 'pull' | 'bidirectional';
+    | 'push'
+    | 'pull'
+    | 'bidirectional';
+  if (!['push', 'pull', 'bidirectional'].includes(direction)) {
+    throw new UsageError('sync: --direction must be push, pull or bidirectional');
+  }
 
   console.log(`[agentvault-sync] sync: direction=${direction}`);
 
-  const { MemorySyncConnector } = await import(
-    '../src/integrations/agent-vault/connectors/memory-sync.connector.js'
-  );
+  const { MemorySyncConnector } =
+    await import('../src/integrations/agent-vault/connectors/memory-sync.connector.js');
 
-  const connector = new MemorySyncConnector(config.agentVault);
+  // The connector follows --direction, not the config file's sync.direction
+  // (default push, under which a pull would silently do nothing), and runs no
+  // periodic pull.
+  const connector = new MemorySyncConnector({
+    ...config.agentVault,
+    sync: { ...config.agentVault.sync, direction, pullIntervalMs: 0 },
+  });
 
+  const failures: string[] = [];
   try {
     if (direction === 'pull' || direction === 'bidirectional') {
       console.log('[agentvault-sync] sync: pulling from AgentVault ...');
-      await connector.pullAll();
-      console.log('[agentvault-sync] sync: pull complete');
+      const report = await connector.pullAll();
+      if (report) {
+        console.log(
+          `[agentvault-sync] sync: pulled ${report.imported.length} concepts, skipped ${report.skipped.length}`
+        );
+        for (const s of report.skipped) {
+          console.log(`[agentvault-sync] sync: skipped ${s.key}: ${s.reason}`);
+        }
+      } else {
+        failures.push('the pull from AgentVault failed (see the log)');
+      }
     }
 
     if (direction === 'push' || direction === 'bidirectional') {
       console.log('[agentvault-sync] sync: pushing to AgentVault ...');
-      const namespace = flags['namespace'] ?? undefined;
-      const page = await conceptService.list({ namespace, limit: 100, offset: 0 });
+      const ids = await listIds(flags['namespace']);
+      const counts = { pushed: 0, skipped: 0, failed: 0 };
+      for (const id of ids) counts[await connector.pushConcept(id)]++;
 
-      let pushed = 0;
-      for (const summary of page.concepts) {
-        await connector.pushConcept(summary.id);
-        pushed++;
+      console.log(
+        `[agentvault-sync] sync: pushed ${counts.pushed} concepts, ${counts.skipped} had nothing to push, ${counts.failed} failed`
+      );
+      if (counts.failed > 0) {
+        failures.push(`${counts.failed} of ${ids.length} concepts failed to push (see the log)`);
       }
-
-      // Handle remaining pages
-      let offset = page.concepts.length;
-      while (offset < page.total) {
-        const nextPage = await conceptService.list({ namespace, limit: 100, offset });
-        for (const summary of nextPage.concepts) {
-          await connector.pushConcept(summary.id);
-          pushed++;
-        }
-        offset += nextPage.concepts.length;
-      }
-
-      console.log(`[agentvault-sync] sync: pushed ${pushed} concepts`);
     }
   } finally {
     connector.stop();
   }
 
+  if (failures.length > 0) throw new Error(`sync: ${failures.join('; ')}`);
   console.log('[agentvault-sync] sync: done');
 }
 
@@ -233,20 +210,24 @@ const USAGE = `
 Usage: agentvault-sync <subcommand> [options]
 
 Subcommands:
-  backup   Export all concepts to a JSON file
-  restore  Import concepts from a JSON backup file
+  backup   Write a backup file (versioned JSONL)
+  restore  Restore concepts from a backup file
   sync     Bidirectional sync with AgentVault memory_repo
 
 Options (backup):
-  --out <path>        Output file path (default: ./polytician-backup-<timestamp>.json)
-  --namespace <ns>    Only export concepts from this namespace
+  --out <path>         Output file (default: <dataDir>/backups/polytician-backup-<time>.jsonl)
+  --namespace <ns>     Only back up this namespace (default: all namespaces)
+  --encrypt            Encrypt with the backup key (POLYTICIAN_BACKUP_KEY or <dataDir>/backup.key)
 
 Options (restore):
-  --file <path>       Path to backup JSON file (required)
+  --file <path>        Backup file to restore (required)
+  --namespace <ns>     Only restore concepts from this namespace
+  --on-conflict <p>    newer (default: keep the newer copy) | overwrite | skip
+  --reembed            Derive new vectors from text (needed if the embedding model changed)
 
 Options (sync):
-  --direction <dir>   push | pull | bidirectional (default: from config or bidirectional)
-  --namespace <ns>    Namespace to sync
+  --direction <dir>    push | pull | bidirectional (default: from config or bidirectional)
+  --namespace <ns>     Namespace to push (default: all namespaces)
 `.trim();
 
 async function main(): Promise<void> {
@@ -257,9 +238,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Initialize database before any operation
-  initializeDatabase();
+  // Initialize database before any operation (async: Postgres needs it)
+  await initializeDatabaseAsync();
 
+  let exitCode = 0;
   try {
     switch (subcommand) {
       case 'backup':
@@ -274,14 +256,18 @@ async function main(): Promise<void> {
       default:
         console.error(`Unknown subcommand: ${subcommand}\n`);
         console.log(USAGE);
-        process.exit(1);
+        exitCode = 1;
     }
+  } catch (err) {
+    console.error(`[agentvault-sync] ${err instanceof Error ? err.message : String(err)}`);
+    exitCode = 1;
   } finally {
-    closeDatabase();
+    await closeDatabase();
   }
+  process.exit(exitCode);
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error('[agentvault-sync] fatal error:', err);
   process.exit(1);
 });

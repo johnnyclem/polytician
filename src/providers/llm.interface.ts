@@ -5,7 +5,8 @@ export interface LLMOptions {
 }
 
 export interface SummarizeOptions {
-  neighborDistances?: number[];
+  /** Search scores of the neighbour texts, in [0, 1] (1 = same direction). */
+  neighborScores?: number[];
   conceptId?: string;
 }
 

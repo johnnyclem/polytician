@@ -1,0 +1,70 @@
+# Namespaces are label compartments. Readers (namespace-readers.json):
+# team and default: alice, bob; finance: alice; ops:oncall: alice, carol.
+# Offline policy decisions only: these calls never reach a Polytician server.
+
+# A trusted session writes into a namespace whose readers may see what it holds.
+mcp/polytician/save_concept {
+  namespace: "team"
+  markdown: "The parser owns tokenization."
+  tags: ["architecture"]
+}
+expect allow
+
+# Reading finance narrows the trajectory to finance's readers.
+mcp/polytician/search_concepts {
+  namespace: "finance"
+  query: "Q3 budget"
+}
+expect allow
+
+# Finance data cannot go to bob, who cannot read finance.
+mcp/mail/send {
+  to: "bob@corp.example"
+}
+expect deny
+
+# Finance's readers can receive it.
+mcp/mail/send {
+  to: "alice@corp.example"
+}
+expect allow
+
+# Nor can it be written into a namespace bob can read, and the operator's
+# review cannot widen an audience.
+mcp/polytician/save_concept {
+  namespace: "team"
+  markdown: "The Q3 budget is 4M."
+}
+expect deny
+
+# An omitted namespace is "default", whose readers include bob.
+mcp/polytician/batch_save_concepts {
+  concepts: [{"markdown": "The Q3 budget is 4M."}]
+}
+expect deny
+
+# It can be written back where it came from.
+mcp/polytician/save_concept {
+  namespace: "finance"
+  markdown: "The Q3 budget is 4M."
+  source: {"origin": "user", "createdBy": "budget-agent"}
+}
+expect allow
+
+# Reads keep the session's trust: memory is written only from trusted data.
+mcp/shell/run_command {
+  command: "make report"
+}
+expect allow
+
+# A prompt built from finance content cannot go to AgentVault's inference chain.
+mcp/polytician/vault_infer {
+  prompt: "Summarize the Q3 budget."
+}
+expect deny
+
+# Embedding text locally discloses nothing.
+mcp/polytician/embed_text {
+  text: "Q3 budget"
+}
+expect allow

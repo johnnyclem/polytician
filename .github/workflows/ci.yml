@@ -10,6 +10,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # CPU inference only: skip onnxruntime-node's CUDA provider download.
+  ONNXRUNTIME_NODE_INSTALL: skip
+
 jobs:
   lint-and-typecheck:
     name: Lint & Typecheck
@@ -18,19 +22,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run format:check
+      # The OpenAPPA battery: its audience source's Python tests, plus
+      # `appa describe --check` and `appa replay` when appa (0.30.0) is installed.
+      - run: npm run appa:check
 
   test:
     name: Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20, 22]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,6 +54,33 @@ jobs:
           path: coverage/
           retention-days: 7
 
+  test-postgres:
+    name: Test (Postgres + pgvector)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: polytest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run tests/postgres-adapter.test.ts
+        env:
+          POLYTICIAN_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/polytest
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -55,51 +89,54 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
       - name: Verify dist output
         run: test -f dist/index.js
 
+  docker-smoke:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # For the smoke script's MCP client.
+      - run: npm ci
+      - run: docker build -t polytician:ci .
+      - name: Run the image and save, then search, over MCP HTTP
+        run: |
+          export POLYTICIAN_HTTP_TOKEN="$(openssl rand -base64 32)"
+          docker run -d --name polytician -p 127.0.0.1:8788:8788 \
+            -e POLYTICIAN_HTTP_TOKEN polytician:ci
+          node scripts/smoke-http.mjs http://127.0.0.1:8788 --embed
+      - name: Validate docker-compose.yml
+        run: docker compose config -q
+        env:
+          POSTGRES_PASSWORD: ci-only
+          POLYTICIAN_HTTP_TOKEN: ci-only-token-ci-only-token-ci-only
+      - name: Container logs
+        if: failure()
+        run: docker logs polytician
+
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # Node.js audit
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
-      - name: npm audit
-        run: npm audit --audit-level=moderate || true
-
-      # Python sidecar audit
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install pip-audit
-        run: pip install pip-audit
-      - name: pip-audit sidecar
-        run: pip-audit -r python-sidecar/requirements.txt --strict || true
-
-  python-sidecar-test:
-    name: Python Sidecar Tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: python-sidecar
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-cov
-      - name: Run tests
-        run: pytest test_app.py -v --tb=short
+      # Blocking: no high or critical advisory in what ships.
+      - name: npm audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+      # Informational: development-only tooling.
+      - name: npm audit (all dependencies)
+        run: npm audit --audit-level=high
+        continue-on-error: true

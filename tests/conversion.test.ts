@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
-// Mock @xenova/transformers for embedding calls during conversion
-vi.mock('@xenova/transformers', () => {
+// Mock @huggingface/transformers for embedding calls during conversion
+vi.mock('@huggingface/transformers', () => {
   const mockPipeline = async (text: string, _options?: Record<string, unknown>) => {
     const hash = Array.from(text).reduce((acc, c) => acc + c.charCodeAt(0), 0);
     const data = new Float32Array(VECTOR_DIMENSION);
@@ -32,6 +32,7 @@ import { ConversionService } from '../src/services/conversion.service.js';
 import { RuleBasedNLPPipeline } from '../src/providers/rule-based-nlp.pipeline.js';
 import type { ThoughtForm } from '../src/types/thoughtform.js';
 import type { LLMProvider, SummarizeOptions, ThoughtFormEntities } from '../src/providers/llm.interface.js';
+import { NotFoundError, OverwriteRefusedError } from '../src/errors/index.js';
 
 let concepts: ConceptService;
 let conversions: ConversionService;
@@ -190,16 +191,57 @@ describe('ConversionService — Non-LLM paths', () => {
       expect(result.markdown).not.toContain('## Relationships');
     });
 
-    it('should overwrite existing markdown', async () => {
+    it('should refuse to replace authored markdown unless overwrite is set', async () => {
       const id = '88888888-8888-4888-a888-888888888888';
       const tf = makeThoughtForm(id);
       await concepts.save({ id, markdown: '# Old markdown', thoughtform: tf });
 
-      await conversions.convert(id, 'thoughtform', 'markdown');
+      await expect(conversions.convert(id, 'thoughtform', 'markdown')).rejects.toThrow(
+        OverwriteRefusedError
+      );
+      expect((await concepts.read(id)).markdown).toBe('# Old markdown');
+
+      await conversions.convert(id, 'thoughtform', 'markdown', { overwrite: true });
 
       const result = await concepts.read(id);
-      expect(result.markdown).not.toBe('# Old markdown');
       expect(result.markdown).toContain('Albert Einstein');
+      expect(result.provenance).toEqual({
+        thoughtform: { origin: 'user' },
+        markdown: { origin: 'derived', derivedFrom: 'thoughtform' },
+      });
+    });
+
+    it('should re-derive a previously derived representation without overwrite', async () => {
+      const id = '89898989-8989-4898-a898-898989898989';
+      await concepts.save({ id, thoughtform: makeThoughtForm(id) });
+      await conversions.convert(id, 'thoughtform', 'markdown');
+      const first = await concepts.read(id);
+
+      await conversions.convert(id, 'thoughtform', 'markdown');
+      const second = await concepts.read(id);
+      expect(second.version).toBe(first.version! + 1);
+      expect(second.markdown).toBe(first.markdown);
+    });
+
+    it('should mark authored markdown as authored again after a caller rewrites it', async () => {
+      const id = '8a8a8a8a-8a8a-4a8a-a8a8-8a8a8a8a8a8a';
+      await concepts.save({ id, thoughtform: makeThoughtForm(id) });
+      await conversions.convert(id, 'thoughtform', 'markdown');
+      await concepts.save({ id, markdown: '# My own edit' });
+
+      expect((await concepts.read(id)).provenance?.markdown).toEqual({ origin: 'user' });
+      await expect(conversions.convert(id, 'thoughtform', 'markdown')).rejects.toThrow(
+        OverwriteRefusedError
+      );
+    });
+
+    it('should reject a namespaced conversion of a concept in another namespace', async () => {
+      const id = '8b8b8b8b-8b8b-4b8b-a8b8-8b8b8b8b8b8b';
+      await concepts.save({ id, namespace: 'agent-b', thoughtform: makeThoughtForm(id) });
+      await expect(
+        conversions.convert(id, 'thoughtform', 'markdown', { namespace: 'agent-a' })
+      ).rejects.toThrow(NotFoundError);
+      expect((await concepts.read(id)).markdown).toBeUndefined();
     });
 
     it('should throw when concept has no thoughtform', async () => {
@@ -245,17 +287,20 @@ describe('ConversionService — LLM paths graceful degradation', () => {
       .rejects.toThrow(/LLM provider|requires.*provider/i);
   });
 
-  it('vector → markdown should use non-LLM fallback when no provider configured', async () => {
+  it('vector → markdown should refuse without an LLM provider', async () => {
     const id = 'eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee';
     const embedding = Array.from({ length: 384 }, () => 0.1);
     await concepts.save({ id, embedding });
+    await concepts.save({ markdown: 'Neighbour text', embedding });
 
-    // Should succeed with non-LLM reconstruction (no neighbors to draw from)
-    await conversions.convert(id, 'vector', 'markdown');
+    // 2.x spliced neighbours' text in as this concept's markdown; there is no
+    // non-LLM way to decode a vector, so the conversion is refused.
+    await expect(conversions.convert(id, 'vector', 'markdown')).rejects.toThrow(
+      /requires an LLM provider/
+    );
 
     const result = await concepts.read(id);
-    expect(result.markdown).toBeDefined();
-    expect(result.markdown).toContain('Reconstructed Concept');
+    expect(result.markdown).toBeUndefined();
   });
 
   it('vector → thoughtform should throw with clear LLM error', async () => {
@@ -332,32 +377,6 @@ describe('ConversionService — LLM-assisted vector-to-markdown', () => {
     teardownTestDb();
   });
 
-  it('should reconstruct markdown from neighbors without LLM', async () => {
-    const { embeddingService } = await import('../src/services/embedding.service.js');
-
-    // Create neighbor concepts with markdown
-    const neighborId1 = 'aaa11111-1111-4111-a111-111111111111';
-    const neighborId2 = 'aaa22222-2222-4222-a222-222222222222';
-    const embedding1 = await embeddingService.embed('Physics and relativity theory');
-    const embedding2 = await embeddingService.embed('Quantum mechanics and particles');
-    await concepts.save({ id: neighborId1, markdown: 'Einstein developed the theory of relativity.', embedding: embedding1 });
-    await concepts.save({ id: neighborId2, markdown: 'Quantum mechanics governs subatomic particles.', embedding: embedding2 });
-
-    // Create target concept with a similar vector
-    const targetId = 'aaa33333-3333-4333-a333-333333333333';
-    const targetEmbedding = await embeddingService.embed('Physics relativity quantum');
-    await concepts.save({ id: targetId, embedding: targetEmbedding });
-
-    // Convert vector → markdown without LLM (NullProvider)
-    await conversions.convert(targetId, 'vector', 'markdown');
-
-    const result = await concepts.read(targetId);
-    expect(result.markdown).toBeDefined();
-    // Should contain reconstructed content from neighbors
-    expect(result.markdown).toContain('Reconstructed Concept');
-    expect(result.markdown).toContain('Related Context');
-  });
-
   it('should include nearest-neighbor context when LLM is configured', async () => {
     const { embeddingService } = await import('../src/services/embedding.service.js');
 
@@ -398,24 +417,73 @@ describe('ConversionService — LLM-assisted vector-to-markdown', () => {
     expect(capturedTexts.length).toBeGreaterThan(0);
     expect(capturedTexts[0]).toContain('Spacetime curvature');
 
-    // Verify neighbor distances were passed
+    // Verify neighbor scores were passed
     expect(capturedOptions).toBeDefined();
-    expect(capturedOptions!.neighborDistances).toBeDefined();
-    expect(capturedOptions!.neighborDistances!.length).toBeGreaterThan(0);
+    expect(capturedOptions!.neighborScores).toBeDefined();
+    expect(capturedOptions!.neighborScores!.length).toBeGreaterThan(0);
+    for (const score of capturedOptions!.neighborScores!) {
+      expect(score).toBeGreaterThanOrEqual(0);
+      expect(score).toBeLessThanOrEqual(1);
+    }
     expect(capturedOptions!.conceptId).toBe(targetId);
+
+    // The result is recorded as LLM output, with the neighbours it came from
+    expect(result.provenance).toEqual({
+      vector: { origin: 'user' },
+      markdown: { origin: 'llm', derivedFrom: 'vector', model: 'mock', sources: [neighborId] },
+    });
   });
 
-  it('should produce valid markdown even with no neighbors', async () => {
+  it("should take neighbour context only from the concept's own namespace", async () => {
+    const { embeddingService } = await import('../src/services/embedding.service.js');
+    let capturedTexts: string[] = [];
+    conversions.setLLMProvider({
+      name: 'mock',
+      async complete() {
+        return '';
+      },
+      async extractEntities(): Promise<ThoughtFormEntities> {
+        return { entities: [], relationships: [], contextGraph: {} };
+      },
+      async summarize(texts: string[]): Promise<string> {
+        capturedTexts = texts;
+        return '# summary';
+      },
+    });
+
+    const embedding = await embeddingService.embed('payroll figures');
+    await concepts.save({ markdown: 'DEFAULT-NS SECRET: payroll numbers', embedding });
+    await concepts.save({ namespace: 'agent-b', markdown: 'agent-b payroll notes', embedding });
+    const target = await concepts.save({ namespace: 'agent-b', embedding });
+
+    await conversions.convert(target.id, 'vector', 'markdown', { namespace: 'agent-b' });
+
+    expect(capturedTexts).toEqual(['agent-b payroll notes']);
+  });
+
+  it('should tell the LLM when there are no neighbours', async () => {
+    let capturedTexts: string[] = [];
+    conversions.setLLMProvider({
+      name: 'mock',
+      async complete() {
+        return '';
+      },
+      async extractEntities(): Promise<ThoughtFormEntities> {
+        return { entities: [], relationships: [], contextGraph: {} };
+      },
+      async summarize(texts: string[]): Promise<string> {
+        capturedTexts = texts;
+        return '# summary';
+      },
+    });
     const targetId = 'ccc11111-1111-4111-a111-111111111111';
     const embedding = Array.from({ length: 384 }, () => 0.1);
     await concepts.save({ id: targetId, embedding });
 
-    // No neighbors exist, non-LLM fallback
     await conversions.convert(targetId, 'vector', 'markdown');
 
-    const result = await concepts.read(targetId);
-    expect(result.markdown).toBeDefined();
-    expect(result.markdown).toContain('No neighboring concepts available');
+    expect(capturedTexts).toEqual(['[No neighbor context available]']);
+    expect((await concepts.read(targetId)).markdown).toBe('# summary');
   });
 });
 
@@ -686,5 +754,55 @@ describe('RuleBasedNLPPipeline', () => {
     for (const entity of result.entities) {
       expect(entity.type).toBe('PERSON');
     }
+  });
+});
+
+// --- POLY-28: relationship inference must stay linear in the number of mentions ---
+
+describe('RuleBasedNLPPipeline relationship inference cost', () => {
+  /** A bulleted note naming `n` distinct people, the shape that took ~5 s at 1,000 entities. */
+  function bulletedNote(n: number): string {
+    const names: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = String.fromCharCode(65 + (i % 26)) + 'x' + i.toString(36).replace(/\d/g, d => 'abcdefghij'[Number(d)]!);
+      names.push(`- Person ${a.charAt(0).toUpperCase()}${a.slice(1)} met Agent Smith`);
+    }
+    return names.join('\n');
+  }
+
+  it('treats each line of a bulleted list as its own sentence', async () => {
+    const pipeline = new RuleBasedNLPPipeline();
+    const result = await pipeline.extractEntities(
+      '- Albert Einstein developed relativity\n- Marie Curie discovered polonium'
+    );
+    const byId = new Map(result.entities.map(e => [e.id, e.text]));
+    const pairs = result.relationships.map(r => [byId.get(r.subjectId), byId.get(r.objectId)]);
+    expect(pairs).not.toContainEqual(['Albert Einstein', 'Marie Curie']);
+  });
+
+  it('compares each mention only with its neighbour, not with every other entity', async () => {
+    const pipeline = new RuleBasedNLPPipeline();
+    const n = 400;
+    // One long sentence (no terminator) with n distinct entities.
+    const text = Array.from({ length: n }, (_, i) => `Entity ${'Abcdefghij'.charAt(0)}${i.toString(36).replace(/\d/g, d => 'abcdefghij'[Number(d)]!)} met`).join(' ');
+    const spy = vi.spyOn(
+      RuleBasedNLPPipeline.prototype as unknown as { extractPredicate: (...args: unknown[]) => unknown },
+      'extractPredicate'
+    );
+    try {
+      const result = await pipeline.extractEntities(text);
+      expect(result.entities.length).toBeGreaterThan(n / 2);
+      expect(spy.mock.calls.length).toBeLessThan(result.entities.length);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('handles a 2,000-entity bulleted note', async () => {
+    const pipeline = new RuleBasedNLPPipeline();
+    const text = bulletedNote(2000);
+    const result = await pipeline.extractEntities(text);
+    expect(result.entities.length).toBeGreaterThan(1000);
+    expect(result.relationships.length).toBeLessThanOrEqual(result.entities.length * 2);
   });
 });

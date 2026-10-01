@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
-// Mock @xenova/transformers to avoid downloading a model in tests
-vi.mock('@xenova/transformers', () => {
+// Mock @huggingface/transformers to avoid downloading a model in tests
+vi.mock('@huggingface/transformers', () => {
   const mockPipeline = async (text: string, _options?: Record<string, unknown>) => {
     // Generate a deterministic pseudo-embedding from the text
     const hash = Array.from(text).reduce((acc, c) => acc + c.charCodeAt(0), 0);

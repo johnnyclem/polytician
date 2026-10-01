@@ -36,8 +36,19 @@ export class AVHttpError extends Error {
   }
 }
 
-/** HTTP status codes considered transient and safe to retry. */
+/** HTTP status codes considered transient. */
 const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+
+export interface RequestOptions {
+  timeoutMs?: number;
+  /**
+   * Retry transient failures (network errors, timeouts, 502/503/504). Default
+   * true for GET only. A POST that timed out may still have been applied, so
+   * retrying it can duplicate a commit or a paid, permanent Arweave upload;
+   * only callers whose POST has no lasting effect (inference) opt in.
+   */
+  retry?: boolean;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -56,23 +67,23 @@ export class AVHttpClient {
     this.maxRetries = config.inference.maxRetries;
   }
 
-  async get<T>(path: string, timeoutMs?: number): Promise<T> {
-    return this.request<T>('GET', path, undefined, timeoutMs);
+  async get<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    return this.request<T>('GET', path, undefined, { retry: true, ...options });
   }
 
-  async post<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
-    return this.request<T>('POST', path, body, timeoutMs);
+  async post<T>(path: string, body: unknown, options: RequestOptions = {}): Promise<T> {
+    return this.request<T>('POST', path, body, { retry: false, ...options });
   }
 
-  async delete<T>(path: string, timeoutMs?: number): Promise<T> {
-    return this.request<T>('DELETE', path, undefined, timeoutMs);
+  async delete<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    return this.request<T>('DELETE', path, undefined, { retry: false, ...options });
   }
 
   private async request<T>(
     method: string,
     path: string,
     body: unknown,
-    timeoutMs?: number
+    options: RequestOptions
   ): Promise<T> {
     validatePath(path);
 
@@ -84,20 +95,23 @@ export class AVHttpClient {
       }
     }
 
+    // The request body (which may carry wallet material) is sent once unless
+    // the caller declared the request safe to repeat.
+    const maxRetries = options.retry ? this.maxRetries : 0;
     let lastError: unknown;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
         await sleep(250 * 2 ** (attempt - 1));
         logger.debug('av-http retry', { method, path, attempt });
       }
       try {
-        return await this.attempt<T>(method, path, bodyStr, timeoutMs);
+        return await this.attempt<T>(method, path, bodyStr, options.timeoutMs);
       } catch (err) {
         lastError = err;
         // Only transient failures are retried: network errors/timeouts and
         // gateway-style 5xx. Application errors (4xx, envelope errors) are not.
         const retryable = !(err instanceof AVHttpError) || RETRYABLE_STATUSES.has(err.statusCode);
-        if (!retryable || attempt === this.maxRetries) {
+        if (!retryable || attempt === maxRetries) {
           logger.error('av-http error', err, { method, path, attempt });
           throw err;
         }
@@ -137,7 +151,18 @@ export class AVHttpClient {
 
     const start = Date.now();
     try {
-      const res = await fetch(url, init);
+      let res: Response;
+      try {
+        res = await fetch(url, init);
+      } catch (err) {
+        if (controller.signal.aborted) {
+          throw new Error(
+            `AgentVault ${method} ${path} timed out after ${timeout}ms` +
+              (method === 'GET' ? '' : '; it may still have been applied')
+          );
+        }
+        throw err;
+      }
       const latencyMs = Date.now() - start;
       logger.debug('av-http request', { method, path, status: res.status, latencyMs });
 

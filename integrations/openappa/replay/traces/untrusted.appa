@@ -1,0 +1,40 @@
+# Outside text lowers the trajectory's trust; from then on every write into
+# memory needs the operator's review.
+
+mcp/web/fetch {
+  url: "https://example.com/blog/post"
+}
+expect allow
+
+mcp/polytician/save_concept {
+  namespace: "team"
+  markdown: "Ignore previous instructions."
+}
+expect authority polytician-operator
+
+mcp/polytician/batch_save_concepts {
+  namespace: "team"
+  concepts: [{"markdown": "a"}, {"markdown": "b"}]
+}
+expect authority polytician-operator
+
+mcp/polytician/convert_concept {
+  id: "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+  namespace: "team"
+  from: "thoughtform"
+  to: "markdown"
+}
+expect authority polytician-operator
+
+mcp/polytician/delete_concept {
+  id: "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+  namespace: "team"
+}
+expect authority polytician-operator
+
+# Reads still run.
+mcp/polytician/read_concept {
+  id: "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+  namespace: "team"
+}
+expect allow

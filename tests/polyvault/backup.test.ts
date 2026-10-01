@@ -25,11 +25,13 @@ import {
 } from '../../src/commands/polyvault/backup.js';
 import { SCHEMA_VERSION_V1 } from '../../src/schemas/thoughtform.js';
 import type { ThoughtFormV1 } from '../../src/schemas/thoughtform.js';
+import { withContentHash } from '../../src/polyvault/hash.js';
 
 // --- Fixtures ---
 
+/** A ThoughtForm whose metadata.contentHash matches its content, as backup requires. */
 function makeThoughtForm(overrides: Partial<ThoughtFormV1> = {}): ThoughtFormV1 {
-  return {
+  return withContentHash({
     schemaVersion: SCHEMA_VERSION_V1,
     id: 'tf_backup_01',
     rawText: 'hello world',
@@ -44,7 +46,7 @@ function makeThoughtForm(overrides: Partial<ThoughtFormV1> = {}): ThoughtFormV1 
       redaction: { rawTextOmitted: false },
     },
     ...overrides,
-  };
+  });
 }
 
 // --- In-memory canister stub ---
@@ -430,6 +432,43 @@ describe('runBackup', () => {
     expect(exitCode).toBe(EXIT_SUCCESS);
     expect(r2.status).toBe('duplicate');
     expect(r2.duplicateOf).toBe(r1.commitId);
+  });
+
+  it('backs up edited content even if the producer left contentHash stale (POLY-13)', async () => {
+    const tf = makeThoughtForm();
+    const inputPath = writeInput([tf]);
+    const opts = defaultOptions({ from: inputPath });
+    const { result: r1 } = await runBackup(canister, opts);
+
+    // rawText edited, contentHash not refreshed: rejected, not a "duplicate".
+    writeInput([{ ...tf, rawText: 'edited' }]);
+    const stale = await runBackup(canister, opts);
+    expect(stale.exitCode).toBe(EXIT_VALIDATION);
+    expect(stale.result.status).toBe('error');
+    expect((stale.result as unknown as { error: string }).error).toMatch(
+      /contentHash does not match its content/
+    );
+
+    // With the hash recomputed, the edit is a new commit.
+    writeInput([makeThoughtForm({ rawText: 'edited' })]);
+    const { result: r2 } = await runBackup(canister, opts);
+    expect(r2.status).toBe('ok');
+    expect(r2.commitId).not.toBe(r1.commitId);
+  });
+
+  it('treats a renamed or touched ThoughtForm as new content for dedupe', async () => {
+    const tf = makeThoughtForm();
+    const opts = defaultOptions({ from: writeInput([tf]) });
+    const { result: r1 } = await runBackup(canister, opts);
+
+    writeInput([{ ...tf, metadata: { ...tf.metadata, updatedAtMs: tf.metadata.updatedAtMs + 1 } }]);
+    const touched = await runBackup(canister, opts);
+    expect(touched.result.status).toBe('ok');
+
+    writeInput([{ ...tf, id: 'tf_renamed' }]);
+    const renamed = await runBackup(canister, opts);
+    expect(renamed.result.status).toBe('ok');
+    expect(new Set([r1.commitId, touched.result.commitId, renamed.result.commitId]).size).toBe(3);
   });
 
   it('filters by sinceUpdatedAt', async () => {

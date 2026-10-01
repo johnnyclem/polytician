@@ -1,6 +1,7 @@
 import type { DatabaseAdapter } from './adapter.js';
 import { SqliteAdapter } from './sqlite-adapter.js';
 import { getConfig } from '../config.js';
+import { logger } from '../logger.js';
 
 let adapter: DatabaseAdapter | null = null;
 
@@ -24,8 +25,24 @@ export function initializeDatabase(overrideDbPath?: string): DatabaseAdapter {
   const dbPath = overrideDbPath ?? config.dbPath;
   const sqliteAdapter = new SqliteAdapter(dbPath);
   sqliteAdapter.initialize();
+  logLegacyLabels(sqliteAdapter.labelLegacyVectors(config.embeddingModel), config.embeddingModel);
+  logLegacyTags(sqliteAdapter.normalizeLegacyTags());
   adapter = sqliteAdapter;
   return adapter;
+}
+
+/**
+ * 2.x recorded no embedding model; its vectors are labelled with the model
+ * configured on the first 3.0 start (2.x's default unless the operator
+ * changed it), after which a model change is detected per vector.
+ */
+function logLegacyLabels(count: number, model: string): void {
+  if (count > 0) logger.info('labelled vectors stored before 3.0', { count, model });
+}
+
+/** 2.x could store `tags` JSON-encoded twice or NULL; the first 3.0 start rewrites them once. */
+function logLegacyTags(count: number): void {
+  if (count > 0) logger.info('rewrote tags stored before 3.0 as JSON arrays', { count });
 }
 
 /**
@@ -40,6 +57,11 @@ export async function initializeDatabaseAsync(overrideDbPath?: string): Promise<
     const { PostgresAdapter } = await import('./postgres-adapter.js');
     const pgAdapter = new PostgresAdapter(config.postgresUrl);
     await pgAdapter.initialize();
+    logLegacyLabels(
+      await pgAdapter.labelLegacyVectors(config.embeddingModel),
+      config.embeddingModel
+    );
+    logLegacyTags(await pgAdapter.normalizeLegacyTags());
     adapter = pgAdapter;
     return adapter;
   }

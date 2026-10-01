@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
 import { ConceptService } from '../src/services/concept.service.js';
+import { NamespaceDeniedError, NotFoundError } from '../src/errors/index.js';
 
 let service: ConceptService;
 
@@ -34,9 +35,30 @@ describe('Namespace isolation', () => {
   it('should allow same-id concepts only once (ID is global)', async () => {
     const id = '11111111-1111-4111-a111-111111111111';
     await service.save({ id, namespace: 'agent-a', markdown: '# Agent A' });
-    // Saving with same ID but different namespace updates the existing row
-    const updated = await service.save({ id, markdown: '# Updated by agent-b' });
+    // A trusted in-process caller that omits the namespace updates the existing row
+    const updated = await service.save({ id, markdown: '# Updated in place' });
     expect(updated.namespace).toBe('agent-a'); // namespace is set at creation
+  });
+
+  it('should refuse to write a concept through a different namespace', async () => {
+    const id = '12121212-1212-4121-a121-121212121212';
+    await service.save({ id, namespace: 'agent-a', markdown: '# Agent A' });
+    await expect(
+      service.save({ id, namespace: 'agent-b', markdown: '# Hijack' })
+    ).rejects.toThrow(NamespaceDeniedError);
+    expect((await service.read(id)).markdown).toBe('# Agent A');
+  });
+
+  it('should hide concepts in other namespaces from namespaced reads and deletes', async () => {
+    const id = '13131313-1313-4131-a131-131313131313';
+    await service.save({ id, namespace: 'agent-a', markdown: '# Agent A' });
+    await expect(service.read(id, undefined, { namespace: 'agent-b' })).rejects.toThrow(
+      NotFoundError
+    );
+    await expect(service.delete(id, { namespace: 'agent-b' })).rejects.toThrow(NotFoundError);
+    expect((await service.read(id, undefined, { namespace: 'agent-a' })).markdown).toBe(
+      '# Agent A'
+    );
   });
 
   it('should scope list results to a namespace', async () => {
@@ -76,7 +98,7 @@ describe('Namespace isolation', () => {
     await service.save({ namespace: 'agent-a', embedding: makeEmbedding(10), tags: ['a'] });
     await service.save({ namespace: 'agent-b', embedding: makeEmbedding(11), tags: ['b'] });
 
-    const results = await service.search(makeEmbedding(10), 10, undefined, { crossNamespace: true });
+    const results = await service.search(makeEmbedding(10), 10, undefined, { namespaces: '*' });
     expect(results.length).toBe(2);
     const namespaces = results.map(r => r.namespace).sort();
     expect(namespaces).toEqual(['agent-a', 'agent-b']);
