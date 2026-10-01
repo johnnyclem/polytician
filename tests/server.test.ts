@@ -80,13 +80,15 @@ describe('MCP Server — Tool integration', () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     expect(names).toEqual([
-      'agentvault_backup',
       'batch_save_concepts',
       'convert_concept',
       'delete_concept',
       'embed_text',
+      'export_backup',
       'get_stats',
       'health_check',
+      'import_backup',
+      'list_backups',
       'list_concepts',
       'read_concept',
       'save_concept',

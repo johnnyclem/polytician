@@ -59,6 +59,35 @@ export interface SaveParams {
   overwrite?: boolean;
 }
 
+/** A concept as a backup holds it: every stored field, representations as values. */
+export interface RestoreRecord {
+  id: string;
+  namespace: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+  tags: string[];
+  markdown: string | null;
+  thoughtform: StoredThoughtForm | null;
+  embedding: number[] | null;
+  derived: DerivedMap;
+}
+
+/**
+ * When a restored concept already exists: 'newer' replaces it only if the
+ * backup copy was updated later (last write wins), 'overwrite' always
+ * replaces it, 'skip' never does.
+ */
+export type RestoreConflictPolicy = 'newer' | 'overwrite' | 'skip';
+
+export type RestoreSkipReason = 'exists' | 'not-newer' | 'other-namespace';
+
+export interface RestoreOutcome {
+  inserted: string[];
+  updated: string[];
+  skipped: Array<{ id: string; namespace: string; reason: RestoreSkipReason }>;
+}
+
 export interface SearchOptions {
   /** Namespace to search (default 'default'). Ignored when `namespaces` is set. */
   namespace?: string;
@@ -260,6 +289,124 @@ export class ConceptService {
           failed.entry.expectedVersion ?? (read.created ? 0 : read.row.version - 1),
           current?.version ?? 0
         );
+      }
+    }
+  }
+
+  /**
+   * Write concepts from a backup as they were saved: same ids, namespaces,
+   * timestamps, tags, representations, vectors and provenance. Every record
+   * is validated before anything is written, then all writes are applied in
+   * one transaction. A concept that lives in another namespace is never
+   * touched; other existing concepts follow `onConflict` (default 'newer').
+   */
+  async restore(
+    records: RestoreRecord[],
+    options: { onConflict?: RestoreConflictPolicy } = {}
+  ): Promise<RestoreOutcome> {
+    const onConflict = options.onConflict ?? 'newer';
+    records.forEach((r, i) => {
+      const label = `backup record ${i + 1}`;
+      validateEntry(
+        {
+          namespace: r.namespace,
+          markdown: r.markdown ?? undefined,
+          thoughtform: r.thoughtform ?? undefined,
+          embedding: r.embedding ?? undefined,
+          tags: r.tags,
+        },
+        label
+      );
+      if (r.markdown === null && r.thoughtform === null && r.embedding === null) {
+        throw new ValidationError(`${label}: a concept needs at least one representation`);
+      }
+    });
+    if (new Set(records.map(r => r.id)).size !== records.length) {
+      throw new ValidationError('a backup cannot contain the same concept id twice');
+    }
+
+    const adapter = getAdapter();
+    for (let attempt = 1; ; attempt++) {
+      const writes: ConceptWrite[] = [];
+      const outcome: RestoreOutcome = { inserted: [], updated: [], skipped: [] };
+      const written: RestoreRecord[] = [];
+
+      for (const r of records) {
+        const existing = await adapter.findConcept(r.id);
+        const content = {
+          tags: JSON.stringify(r.tags),
+          markdown: r.markdown,
+          thoughtform: r.thoughtform !== null ? JSON.stringify(r.thoughtform) : null,
+          embedding: r.embedding !== null ? serializeEmbedding(r.embedding) : null,
+          derived: JSON.stringify(r.derived),
+        };
+        if (!existing) {
+          writes.push({
+            kind: 'insert',
+            row: {
+              id: r.id,
+              namespace: r.namespace,
+              version: r.version,
+              created_at: r.createdAt,
+              updated_at: r.updatedAt,
+              ...content,
+            },
+          });
+          outcome.inserted.push(r.id);
+          written.push(r);
+          continue;
+        }
+        const skip = (reason: RestoreSkipReason): void => {
+          outcome.skipped.push({ id: r.id, namespace: r.namespace, reason });
+        };
+        if (existing.namespace !== r.namespace) {
+          skip('other-namespace');
+          continue;
+        }
+        if (onConflict === 'skip') {
+          skip('exists');
+          continue;
+        }
+        if (onConflict === 'newer' && r.updatedAt <= existing.updated_at) {
+          skip('not-newer');
+          continue;
+        }
+        writes.push({
+          kind: 'update',
+          id: r.id,
+          namespace: existing.namespace,
+          expectedVersion: existing.version,
+          // updated_at never moves backwards, so later syncs still see this as the newest write.
+          fields: {
+            version: existing.version + 1,
+            updated_at: Math.max(r.updatedAt, existing.updated_at + 1),
+            ...content,
+          },
+        });
+        outcome.updated.push(r.id);
+        written.push(r);
+      }
+
+      if (writes.length === 0) return outcome;
+      const applied = await adapter.applyWrites(writes);
+      if (applied.ok) {
+        const now = Date.now();
+        const inserted = new Set(outcome.inserted);
+        for (const r of written) {
+          conceptEventBus.emit(inserted.has(r.id) ? 'concept.created' : 'concept.updated', {
+            conceptId: r.id,
+            embedding: r.embedding,
+            timestamp: now,
+          });
+        }
+        return outcome;
+      }
+      // A concurrent writer changed a row between our read and our write;
+      // nothing was applied, so re-read and plan again.
+      if (attempt >= MAX_WRITE_ATTEMPTS) {
+        const failed = written[applied.index];
+        const current = failed ? await adapter.findConcept(failed.id) : null;
+        throw new VersionConflictError(failed?.id ?? '?', 0, current?.version ?? 0);
       }
     }
   }

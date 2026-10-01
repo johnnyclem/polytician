@@ -17,6 +17,7 @@ import { LIMITS } from './types/limits.js';
 import { ValidationError } from './errors/index.js';
 import { getConfig } from './config.js';
 import { jsonResult, runTool } from './mcp/tool-result.js';
+import { registerBackupTools } from './mcp/tools/backup.js';
 
 const namespaceArg = NamespaceSchema.optional().describe(
   'Namespace (default: "default"). Must be in POLYTICIAN_NAMESPACES when the operator set one.'
@@ -334,10 +335,9 @@ export async function createServer(): Promise<McpServer> {
       })
   );
 
-  // --- AgentVault Backup ---
+  // --- Backups ---
 
-  const { registerBackupTool } = await import('./mcp/tools/agentvault.js');
-  registerBackupTool(server);
+  registerBackupTools(server);
 
   // Register AgentVault tools if integration is configured
   const cfg = getConfig();

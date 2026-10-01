@@ -3,8 +3,6 @@
  *
  * This module covers the full bundle lifecycle:
  * - {@link serializeBundle}: array of ThoughtForms → JSON (+ optional gzip)
- * - {@link encryptBundle} / {@link decryptBundle}: placeholder VetKeys-style
- *   encryption hooks for the AgentVault security module
  * - {@link deserializeAndUpsertBundle}: JSON / gzip bundle → database upsert
  *   with last-write-wins conflict handling
  * - {@link serializeThoughtFormsBundle}: database → versioned bundle envelope
@@ -12,7 +10,6 @@
 
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
-import { getConfig } from '../config.js';
 import { getAdapter } from '../db/client.js';
 import type { ConceptRow } from '../db/adapter.js';
 import { ThoughtFormSchema } from '../types/thoughtform.js';
@@ -47,40 +44,6 @@ export function serializeBundle(
 
   const compressed = gzipSync(Buffer.from(json, 'utf8'));
   return { json, compressed, rawSize, compressedSize: compressed.byteLength };
-}
-
-/**
- * Encrypt a serialized ThoughtForm bundle.
- *
- * Currently a no-op that returns the input buffer unchanged.
- * Will be replaced with AgentVault VetKeys integration in a future release.
- */
-export async function encryptBundle(buffer: Buffer): Promise<Buffer> {
-  const { encrypt } = getConfig();
-
-  if (!encrypt) {
-    return buffer;
-  }
-
-  // TODO: integrate with AgentVault security module (VetKeys)
-  return buffer;
-}
-
-/**
- * Decrypt a serialized ThoughtForm bundle.
- *
- * Currently a no-op that returns the input buffer unchanged.
- * Will be replaced with AgentVault VetKeys integration in a future release.
- */
-export async function decryptBundle(buffer: Buffer): Promise<Buffer> {
-  const { encrypt } = getConfig();
-
-  if (!encrypt) {
-    return buffer;
-  }
-
-  // TODO: integrate with AgentVault security module (VetKeys)
-  return buffer;
 }
 
 /**

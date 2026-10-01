@@ -18,7 +18,7 @@ Everything runs on your machine. Embeddings are generated in-process; there's no
 - 🔒 **Local-first embeddings** — `@xenova/transformers` runs `all-MiniLM-L6-v2` in-process (384 dimensions); no network round-trip, no API key required
 - 🗂️ **Namespaces + optimistic concurrency** — every tool call is scoped to a namespace, and an operator allowlist (`POLYTICIAN_NAMESPACES`) limits which ones a server serves (see [Namespaces](#namespaces) for exactly what that does and does not isolate). `expectedVersion` is checked in the same statement that writes, so of two concurrent writers holding the same version exactly one succeeds
 - 🔌 **Pluggable LLM + NLP** — bring your own provider (Anthropic, OpenAI, MCP sampling, or [AgentVault](#agentvault-integration)) for the conversions that need one (`markdown→thoughtform`, `vector→markdown`, `vector→thoughtform`)
-- 🧳 **Portable backups** — snapshot and restore your entire memory as a single signed JSON bundle (optionally AES-256-GCM encrypted), with an optional Arweave archival path via AgentVault
+- 🧳 **Portable backups** — `export_backup` / `import_backup` write and restore every namespace (vectors, tags, thoughtforms and provenance included) as one versioned JSONL file, optionally AES-256-GCM encrypted, with a checksum that detects truncation and edits
 - 🚀 **Deploys anywhere** — a single Node process (SQLite by default), with first-class Docker Compose and Kubernetes manifests for a distributed, Postgres-backed, multi-node setup
 
 ---
@@ -31,7 +31,8 @@ Everything runs on your machine. Embeddings are generated in-process; there's no
 │                    @modelcontextprotocol/sdk                      │
 ├───────────────────────────────────────────────────────────────────┤
 │ Tools: save/read/delete/list/batch/search/convert/embed/          │
-│        health_check/get_stats/agentvault_backup + vault_* (opt.)  │
+│        health_check/get_stats/export|import|list_backups          │
+│        + vault_* (optional, AgentVault)                           │
 ├───────────────────────────────────────────────────────────────────┤
 │ Embeddings: @xenova/transformers (all-MiniLM-L6-v2, 384-dim,      │
 │             in-process — no external call)                        │
@@ -150,8 +151,10 @@ Polytician is configured entirely through environment variables (or a `.polytici
 | `POLYTICIAN_NLP_PIPELINE` | `none` | `rule-based`, `llm`, or `none` — used by `markdown→thoughtform` |
 | `POLYTICIAN_NAMESPACES` | unset | Namespaces tool calls may address: a comma-separated list, or `*` for any. Unset allows any namespace but refuses `crossNamespace` search. See [Namespaces](#namespaces) |
 | `POLYTICIAN_NODE_ID` | random | Identifies this node in a distributed/multi-node deployment |
-| `POLYTICIAN_ENCRYPT` | `false` | Encrypt PolyVault backup bundles (AES-256-GCM) — see [Backup, Restore & Encryption](#backup-restore--encryption) |
-| `POLYTICIAN_BACKUP_THRESHOLD` | `50` | Auto-trigger a backup after this many saves (`0` disables) |
+| `POLYTICIAN_ENCRYPT` | `false` | Require every backup file to be encrypted (AES-256-GCM); fails closed without a key. `--encrypt` does the same. See [Backup, Restore & Encryption](#backup-restore--encryption) |
+| `POLYTICIAN_BACKUP_KEY` / `POLYTICIAN_BACKUP_KEY_FILE` | — / `<dataDir>/backup.key` | The 256-bit backup key (base64 or hex), or a file holding it (must be mode `600`) |
+| `POLYTICIAN_BACKUP_THRESHOLD` | `0` (off) | Write an auto-backup after this many saves |
+| `POLYTICIAN_BACKUP_RETAIN` | `10` | Auto-backups to keep; older ones are deleted |
 | `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` | — | Enable the [AgentVault integration](#agentvault-integration) and its `vault_*` tools |
 
 ---
@@ -160,7 +163,7 @@ Polytician is configured entirely through environment variables (or a `.polytici
 
 All tools return `{ "content": [{ "type": "text", "text": "<JSON>" }] }`; the examples below show the decoded JSON payload for brevity. Authoritative schemas live in `src/server.ts`.
 
-Every tool's input schema is strict: an unknown argument is a validation error, not silently dropped. Every tool that takes a `namespace` defaults it to `"default"`. Errors from the service come back with `isError: true` and a JSON body `{ "error", "code" }`, where `code` is one of `NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT` (plus `currentVersion`), `NAMESPACE_DENIED`, `OVERWRITE_REFUSED` or `CONVERSION_ERROR`.
+Every tool's input schema is strict: an unknown argument is a validation error, not silently dropped. Every tool that takes a `namespace` defaults it to `"default"`. Errors from the service come back with `isError: true` and a JSON body `{ "error", "code" }`, where `code` is one of `NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT` (plus `currentVersion`), `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR` or `CONFIG_ERROR` (the server is missing configuration the call needs, such as a backup key).
 
 Input caps: markdown ≤ 1,000,000 characters, thoughtform ≤ 2,000,000 characters of JSON, ≤ 64 tags of ≤ 128 characters, ≤ 500 concepts per batch, query/`embed_text` text ≤ 100,000 characters. Namespaces match `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`. Embeddings must have exactly 384 finite components and must not be all zero.
 
@@ -236,9 +239,13 @@ The result is stored as a **derived** representation (see `derived` in `read_con
 
 `{ "namespace"? }` → server + embedding model + LLM provider status, and concept/representation counts for that namespace (default `"default"`).
 
-### `agentvault_backup`
+### `export_backup` / `import_backup` / `list_backups`
 
-`{ "namespace"? }` → serializes every concept in the namespace into a signed JSON bundle: `{ "success", "conceptCount", "sizeBytes", "sha256", "namespace", "lastSynced", "createdAt" }`. See [Backup, Restore & Encryption](#backup-restore--encryption).
+- `export_backup { namespace?, encrypt? }` writes a backup file into `<dataDir>/backups` (mode `600`) covering every namespace the server serves, or just `namespace`, and returns `{ file, path, backupId, createdAt, conceptCount, namespaces: { <ns>: <count> }, sizeBytes, sha256, encrypted, keyId }`.
+- `import_backup { file, namespace?, onConflict?, reembed? }` restores a backup named by its file name in that directory (paths are refused). It returns `{ inserted, updated, skipped: [{ id, namespace, reason }], reembedded, vectorsDropped, ... }`. `onConflict` is `"newer"` (default: an existing concept is replaced only if the backup copy was updated later), `"overwrite"` or `"skip"`.
+- `list_backups {}` lists the backups in that directory, newest first, from their headers.
+
+See [Backup, Restore & Encryption](#backup-restore--encryption).
 
 ### AgentVault-only tools (`vault_*`)
 
@@ -252,7 +259,6 @@ Registered only when `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` are set
 | `vault_archive_concept` | Permanently archive a concept to Arweave, returning a transaction ID/URL |
 | `vault_get_secret` | Fetch secret **metadata** (name, provider, rotation date, length) — never the raw value |
 | `vault_memory_repo_log` | Inspect the `memory_repo` branch head and entry state |
-| `vault_restore` | Restore concepts from an inline bundle or file path. Each concept is validated and saved into its bundle namespace; namespaces outside `POLYTICIAN_NAMESPACES`, and ids that already live in another namespace, are reported as per-concept errors |
 
 ---
 
@@ -336,23 +342,30 @@ Run the adapter's tests against a disposable database with `POLYTICIAN_TEST_POST
 
 ## Backup, Restore & Encryption
 
-`agentvault_backup` (and the `agentvault-sync` CLI, see below) serialize a namespace's concepts into a single JSON bundle with a `sha256` integrity hash. Set `POLYTICIAN_ENCRYPT=true` (or pass `--encrypt`) to encrypt the bundle with AES-256-GCM behind a VetKeys-shaped crypto interface (`src/polyvault/crypto.ts`) — today that's a local AES-GCM adapter, laid out so a future IC/VetKeys threshold-key backend can drop in without changing the bundle format.
+Backups are files in `<dataDir>/backups` (`~/.polytician/backups` by default; the directory is mode `700` and each file mode `600`). The `export_backup`, `import_backup` and `list_backups` tools, the auto-backup and the `agentvault-sync` CLI all read and write the same format:
 
-A standalone CLI is also available for scripted backup/restore/sync outside of an MCP client:
+- **Format:** JSONL, versioned (`"format": "polytician-backup", "formatVersion": 1`). Line 1 is a header (backup id, creation time, the embedding model id and dimension, and the encryption parameters), then one line per concept (id, namespace, version, timestamps, tags, markdown, thoughtform, embedding and provenance, all as JSON values), then a footer with per-namespace counts and a SHA-256 over the header and concept lines. The reference is [`src/backup/format.ts`](src/backup/format.ts).
+- **Scope:** every namespace unless one is named (`export_backup` covers the namespaces the server serves under `POLYTICIAN_NAMESPACES`).
+- **Restore:** `import_backup` verifies the file (checksum, counts, and the AES-GCM tag when encrypted) and validates every concept before writing anything, then writes all of them in one transaction with their original ids, namespaces, timestamps, tags, vectors and provenance. It never writes into a concept that lives in another namespace. If the backup's embedding model differs from the server's, it refuses unless `reembed: true`, which derives new vectors from each concept's text.
+- **Encryption:** `export_backup { encrypt: true }`, `agentvault-sync backup --encrypt`, or `POLYTICIAN_ENCRYPT=true` (which makes every backup writer, including auto-backup, encrypt and refuse plaintext) encrypt the concept lines with AES-256-GCM. The random 96-bit nonce, the AAD (which binds the body to the header's backup id) and the key's fingerprint are stored in the header. The key is `POLYTICIAN_BACKUP_KEY` or the key file (`POLYTICIAN_BACKUP_KEY_FILE`, default `<dataDir>/backup.key`, mode `600`). Polytician never generates a key: if encryption is requested and no key is configured, the export fails instead of writing plaintext. Create one with `openssl rand -base64 32 > ~/.polytician/backup.key && chmod 600 ~/.polytician/backup.key`, and **keep a copy off the machine**, because an encrypted backup cannot be restored without it. Importing with the wrong key fails with an error naming both key fingerprints.
+- **Integrity boundary:** the footer checksum detects truncation and accidental edits, and the GCM tag detects any change to an encrypted body. Neither is a signature: anyone who holds the file (and, for encrypted files, the key) can write a backup that verifies.
+- **Auto-backup** is off by default. Set `POLYTICIAN_BACKUP_THRESHOLD=N` to write a full backup after every N saves (a burst of saves, such as a batch or an import, triggers one backup), keeping the newest `POLYTICIAN_BACKUP_RETAIN` (default 10).
+
+The CLI runs the same export and import outside an MCP client. As an operator tool it accepts any `--out` / `--file` path:
 
 ```bash
-npx tsx bin/agentvault-sync.ts backup  --out backup.json --namespace default
-npx tsx bin/agentvault-sync.ts restore --file backup.json
-npx tsx bin/agentvault-sync.ts sync    --direction bidirectional --namespace default
+npx tsx bin/agentvault-sync.ts backup  [--out backup.jsonl] [--namespace work] [--encrypt]
+npx tsx bin/agentvault-sync.ts restore --file backup.jsonl [--on-conflict newer|overwrite|skip] [--reembed]
+npx tsx bin/agentvault-sync.ts sync    --direction bidirectional
 ```
 
-See [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md) for the bundle format and [`docs/polyvault/runbook.md`](docs/polyvault/runbook.md) for operational guidance.
+PolyVault (`src/polyvault/`, `src/commands/polyvault/`) is a separate, chunked backup format for an Internet Computer canister; see [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md).
 
 ---
 
 ## AgentVault Integration
 
-Polytician doubles as a semantic-memory source, on-chain backup target, and inference/secrets provider for [AgentVault](https://github.com/johnnyclem/agentvault)'s orchestrator, via the `vault_*` tools and `agentvault_backup` above. See:
+Polytician doubles as a semantic-memory source, on-chain backup target, and inference/secrets provider for [AgentVault](https://github.com/johnnyclem/agentvault)'s orchestrator, via the `vault_*` tools above. See:
 
 - [`AGENTVAULT_COMPATIBILITY_PRD.md`](AGENTVAULT_COMPATIBILITY_PRD.md) — the spec for AgentVault's side of this integration
 - [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md) — the encrypted backup/restore bridge (PolyVault)
@@ -406,7 +419,9 @@ polytician/
 │   ├── config.ts              # Env-var / .polytician.json configuration
 │   ├── db/                    # SQLite + Postgres adapters
 │   ├── services/               # concept, conversion, embedding, backup, index-sync
-│   ├── polyvault/ & lib/polyvault/  # Encrypted backup bundle format + FAISS client
+│   ├── backup/                 # Backup file format (JSONL), key loading, backups directory
+│   ├── mcp/tools/              # export_backup / import_backup / list_backups
+│   ├── polyvault/ & lib/polyvault/  # PolyVault chunked canister format + FAISS client
 │   ├── integrations/agent-vault/    # AgentVault config, providers, vault_* tools
 │   └── sidecar/                # HTTP client for the optional Python sidecar
 ├── python-sidecar/             # Optional Flask helper: FAISS rebuild, PolyVault bundles

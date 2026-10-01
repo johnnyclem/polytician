@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseAgentVaultConfig, type AgentVaultConfig } from './integrations/agent-vault/config.js';
+import { ConfigurationError } from './errors/index.js';
 
 export interface LLMConfig {
   provider: 'anthropic' | 'openai' | 'sampling' | 'agentvault' | 'none';
@@ -35,8 +36,10 @@ export interface DistributedConfig {
 export type NamespaceAllowlist = readonly string[] | '*' | null;
 
 export interface BackupConfig {
-  /** Number of saves before auto-backup triggers. 0 disables auto-backup. */
+  /** Write an auto-backup after this many saves. 0 (the default) disables auto-backup. */
   threshold: number;
+  /** Auto-backups to keep; older ones are deleted after each auto-backup. */
+  retain: number;
 }
 
 export interface PolyticianConfig {
@@ -53,7 +56,7 @@ export interface PolyticianConfig {
   distributed: DistributedConfig;
   namespaces: NamespaceAllowlist;
   agentVault?: AgentVaultConfig;
-  /** Enable VetKeys-style encryption for ThoughtForm bundles. */
+  /** Require every backup file to be encrypted (AES-256-GCM with the backup key). */
   encrypt: boolean;
   backup: BackupConfig;
 }
@@ -173,12 +176,18 @@ export function getConfig(): PolyticianConfig {
     agentVault: agentVaultConfig,
     encrypt: !!encryptFlag,
     backup: {
-      threshold:
-        parseInt(
-          process.env['POLYTICIAN_BACKUP_THRESHOLD'] ??
-            String((fileConfig as Record<string, unknown>).backupThreshold ?? '50'),
-          10
-        ) || 50,
+      threshold: parseCount(
+        'POLYTICIAN_BACKUP_THRESHOLD',
+        process.env['POLYTICIAN_BACKUP_THRESHOLD'] ??
+          (fileConfig as Record<string, unknown>).backupThreshold,
+        0
+      ),
+      retain: parseCount(
+        'POLYTICIAN_BACKUP_RETAIN',
+        process.env['POLYTICIAN_BACKUP_RETAIN'] ??
+          (fileConfig as Record<string, unknown>).backupRetain,
+        10
+      ),
     },
   };
 
@@ -201,6 +210,16 @@ function parseNamespaces(raw: unknown): NamespaceAllowlist {
     .filter(n => n.length > 0);
   if (list.includes('*')) return '*';
   return list.length > 0 ? [...new Set(list)] : null;
+}
+
+/** A non-negative integer setting; unset means `fallback`, anything else invalid is an error. */
+function parseCount(name: string, raw: unknown, fallback: number): number {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const value = typeof raw === 'number' ? raw : Number(String(raw).trim());
+  if (!Number.isInteger(value) || value < 0) {
+    throw new ConfigurationError(`${name} must be a non-negative integer`);
+  }
+  return value;
 }
 
 function parseBool(value: string | undefined): boolean | undefined {

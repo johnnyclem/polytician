@@ -4,7 +4,7 @@ This guide covers every breaking change in 3.0 and what to do about it. The full
 
 ## Before you upgrade
 
-- **Back up the database** (`~/.polytician/concepts.db`, or a `pg_dump` of the Postgres database). The first 3.0 start migrates the schema in place, and 2.x cannot read the migrated vector index.
+- **Back up the database** (`~/.polytician/concepts.db`, or a `pg_dump` of the Postgres database). The first 3.0 start migrates the schema in place, and 2.x cannot read the migrated vector index. Copy the file (or dump the database): 3.0 cannot import 2.x backup files (see "Backups" below), so a 2.x backup is only restorable with 2.x.
 - **Postgres:** make sure pgvector is at least 0.5 (HNSW); 0.8 or newer is recommended. Check with `SELECT extversion FROM pg_extension WHERE extname = 'vector';`.
 
 ## What the first start does
@@ -69,6 +69,12 @@ A `save_concept` create must include at least one of `markdown`, `thoughtform` o
 
 `batch_save_concepts` is all-or-nothing: one invalid entry fails the whole call and nothing is written. Validate or split input if you relied on partial success. The batch-wide `namespace` argument applies to all entries.
 
+### Backups
+
+- `agentvault_backup` is gone (it never persisted anything). Call `export_backup` (optionally `{ namespace }` or `{ encrypt: true }`); it returns the `file` name to pass to `import_backup { file }`. `list_backups` lists them.
+- `vault_restore` is gone. Put the backup file in `<dataDir>/backups` and call `import_backup { file: "<name>" }`. Inline bundles and arbitrary paths are no longer accepted.
+- `import_backup` keeps a local concept that is as new as or newer than the backup copy (`onConflict: "newer"`), where `vault_restore` overwrote it. Pass `onConflict: "overwrite"` to restore over newer local edits.
+
 ### Error bodies
 
 Service errors are returned as `{ "error": "...", "code": "..." }` (with `isError: true`). Branch on `code` (`NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT`, `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR`), not on message text.
@@ -78,6 +84,20 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 - Remove `POLYTICIAN_ASYNC_INDEX_SYNC` / `distributed.asyncIndexSync`; it no longer exists. Writes update the row and its vector in one transaction, so nothing needs syncing.
 - Decide on `POLYTICIAN_NAMESPACES`. Leave it unset for a single-user server, set it to the list of namespaces a server should expose, or set `*` to allow every namespace and enable `crossNamespace` search. The allowlist does not authenticate callers; see "Namespaces" in the README.
 
+### Backups and encryption
+
+- **Make a fresh backup after upgrading.** The 3.0 format (JSONL, `formatVersion: 1`) is different from every 2.x backup file, and 3.0 does not read 2.x files. Your data itself is migrated in place, so the simplest path is: copy the 2.x database, upgrade, start once, then `export_backup` (or `agentvault-sync backup`).
+- **Auto-backup is now off.** If you relied on the 2.x default (every 50 saves), set `POLYTICIAN_BACKUP_THRESHOLD=50`, and `POLYTICIAN_BACKUP_RETAIN` if you want to keep more than 10. The old `backup-*.json` files in `<dataDir>/backups` are not touched or pruned; delete them when you no longer need them (they are plaintext and were created world-readable).
+- **If you set `POLYTICIAN_ENCRYPT` or `--encrypt`,** your 2.x backups were not encrypted. Create a key before upgrading, or every backup will fail with `CONFIG_ERROR`:
+
+  ```bash
+  openssl rand -base64 32 > ~/.polytician/backup.key && chmod 600 ~/.polytician/backup.key
+  ```
+
+  (or set `POLYTICIAN_BACKUP_KEY`). Store a copy of the key somewhere other than this machine. An encrypted backup cannot be restored without it.
+- **`agentvault-sync backup`** now writes every namespace by default (pass `--namespace` for one) in JSONL, to `<dataDir>/backups` unless you pass `--out`. Scripts that parsed the 2.x JSON output need updating. `restore` keeps newer local copies unless `--on-conflict overwrite`.
+- The SQLite database file is set to mode `600` on start. If another local user or group needs to read it, grant that explicitly.
+
 ## Library users (`ConceptService`, `DatabaseAdapter`)
 
 - `ConceptService.search()` returns `{ id, namespace, score, tags, representations }`. The option `{ crossNamespace: true }` is now `{ namespaces: '*' }`; `{ namespaces: ['a', 'b'] }` searches several namespaces.
@@ -86,3 +106,5 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 - Custom `DatabaseAdapter` implementations must add `applyWrites(writes)`, which applies inserts, conditional updates (`WHERE version = expectedVersion`) and deletes atomically, keeping the vector index in step. They must also accept `vectorSearch(query, k, { namespaces, tags })` with the filters applied inside the KNN query and `distance` as cosine distance, and `upsertVector(id, namespace, embedding)`.
 - `IndexSyncService` only keeps `rebuildAfterDeserialize()`; `start()`, `stop()`, `waitForPending()` and `pendingCount` were removed.
 - `SummarizeOptions.neighborDistances` is now `neighborScores`, with the same `[0, 1]` scores as search.
+- `encryptBundle` and `decryptBundle` (`src/storage/thoughtform.ts`) were removed; they returned their input unchanged. Backup encryption lives in `src/backup/format.ts`.
+- `BackupService.runBackup()` writes the JSONL format and returns the file path; `exportBackup`, `importBackup` and `importBackupBytes` in `src/services/backup.service.ts` are the export/import entry points.

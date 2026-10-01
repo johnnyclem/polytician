@@ -61,7 +61,7 @@ async function main(): Promise<void> {
     });
   }
 
-  // Start auto-backup service (always active; threshold=0 disables it)
+  // Start auto-backup service (writes nothing unless POLYTICIAN_BACKUP_THRESHOLD > 0)
   backupService.start();
 
   // Create MCP server with all tools registered

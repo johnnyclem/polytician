@@ -27,10 +27,19 @@ Upgrade notes for every breaking change are in [MIGRATION.md](MIGRATION.md).
 - **`search_concepts` requires exactly one of `query` or `vector`.**
 - **Removed `POLYTICIAN_ASYNC_INDEX_SYNC`** (`distributed.asyncIndexSync`) and the event-driven vector re-sync in `IndexSyncService`. The vector is now written in the same transaction as its row. The re-sync ran outside that transaction and could re-insert the vector of a concept deleted in the meantime.
 - **Postgres: HNSW cosine index.** A schema migration drops 2.x's IVFFlat (`vector_l2_ops`, `lists = 100`) index, which was built on an empty table and gave very low recall, and creates `hnsw (embedding vector_cosine_ops)`. Requires pgvector ≥ 0.5.
+- **`agentvault_backup` is replaced by `export_backup`, `import_backup` and `list_backups`.** `agentvault_backup` reported success and a SHA-256 but wrote nothing anywhere, ignored `POLYTICIAN_ENCRYPT`, and covered only one namespace. `export_backup` writes a file into `<dataDir>/backups` covering every namespace the server serves, `import_backup` restores one, and `list_backups` lists them.
+- **One backup format: versioned JSONL** (`polytician-backup`, format version 1), written and read by `export_backup`/`import_backup`, the auto-backup and `agentvault-sync backup`/`restore`. It carries vectors with the embedding model id, and tags, thoughtforms and provenance as JSON values, plus a footer checksum. The three 2.x formats (the `agentvault_backup` bundle, the auto-backup's `backup-*.json` with tags and thoughtforms as JSON strings and no vectors, and the CLI's JSON) are no longer read or written.
+- **`vault_restore` is removed.** Its `path` argument read any file on disk and echoed the first bytes of non-JSON files in its error. Use `import_backup`, which only reads files inside `<dataDir>/backups` by name and never quotes file content in errors.
+- **Encryption is real and fails closed.** `POLYTICIAN_ENCRYPT` / `--encrypt` used to be a silent no-op (every backup was plaintext). Backups are now encrypted with AES-256-GCM under a key from `POLYTICIAN_BACKUP_KEY` or an owner-only key file (`POLYTICIAN_BACKUP_KEY_FILE`, default `<dataDir>/backup.key`). With `POLYTICIAN_ENCRYPT` set, every backup writer encrypts, a plaintext export is refused, and a missing key is an error (`CONFIG_ERROR`) rather than a plaintext file. The `encryptBundle`/`decryptBundle` stubs in `src/storage/thoughtform.ts` are removed.
+- **Auto-backup is off by default** and keeps the newest `POLYTICIAN_BACKUP_RETAIN` (default 10) files. In 2.x it ran every 50 saves with no rotation. `POLYTICIAN_BACKUP_THRESHOLD=0` now disables it (2.x read `0` as 50), and a non-numeric value is a startup error. A burst of saves that crosses the threshold writes one backup.
+- **Files are owner-only.** Backup files are mode `600` in a `700` directory, and the SQLite database file is set to mode `600` on start (a new data directory is created `700`).
+- **`agentvault-sync backup`** without `--namespace` exports every namespace (2.x exported only `default` and labelled the file `all`), writes JSONL to `<dataDir>/backups` unless `--out` is given, and honours `--encrypt`. `restore` reads the new format, keeps newer local copies unless `--on-conflict overwrite`, and exits non-zero on errors. `sync` pushes every namespace when `--namespace` is omitted.
 - **Library API (`ConceptService`, `DatabaseAdapter`)**: `search()` results carry `score`. `search()` options take `namespaces: string[] | '*'` instead of `crossNamespace`. `read()`/`delete()` take `{ namespace }`. `save()` takes `autoEmbed`/`derived`/`overwrite`. Adapters implement `applyWrites()`, and `vectorSearch(query, k, filter)`/`upsertVector(id, namespace, embedding)` changed signature. `SummarizeOptions.neighborDistances` became `neighborScores`.
 
 ### Added
 
+- `ConceptService.restore(records, { onConflict })`: writes backup records with their ids, namespaces, timestamps, vectors and provenance in one transaction.
+- `CONFIG_ERROR` error code for calls that need configuration the server lacks (such as a backup key).
 - `POLYTICIAN_NAMESPACES` (or `namespaces` in the config file): the operator allowlist of namespaces a server serves.
 - `derived` on every concept: which representations were derived rather than authored, with provenance (`from`, and for LLM conversions `provider` and neighbour `sources`).
 - `convert_concept` `overwrite` argument, and `autoEmbed` on `save_concept`.
@@ -39,6 +48,7 @@ Upgrade notes for every breaking change are in [MIGRATION.md](MIGRATION.md).
 
 ### Fixed
 
+- A backup can be restored: in 2.x the only persisted backups (auto-backups) stored tags and thoughtforms as JSON strings and no vectors, so a restore corrupted tags (a later tag merge produced `["[", "\"", ...]`), double-encoded thoughtforms and left nothing searchable.
 - Namespace- and tag-filtered search no longer post-filters a global top-k. The filters run inside the KNN query: the vec0 namespace partition key and a candidate-id constraint on sqlite-vec, SQL `WHERE` with HNSW iterative scan (or exact scan on pgvector < 0.8) on Postgres. A crowded namespace can no longer hide another namespace's matches.
 - Saving is atomic: the concept row and its vector are written in one transaction on both backends. A failed vector write no longer leaves a concept that reports a vector but is never found.
 - Concurrent tag merges without `expectedVersion` no longer lose tags.

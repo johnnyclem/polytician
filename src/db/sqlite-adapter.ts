@@ -1,6 +1,6 @@
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
-import { mkdirSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type {
   DatabaseAdapter,
@@ -54,9 +54,12 @@ export class SqliteAdapter implements DatabaseAdapter {
   constructor(dbPath: string) {
     const dir = dirname(dbPath);
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     this.db = new Database(dbPath);
+    // Memories are private: owner-only, before the WAL and SHM files (which
+    // SQLite creates with the database file's mode) exist.
+    if (dbPath !== ':memory:' && process.platform !== 'win32') chmodSync(dbPath, 0o600);
   }
 
   initialize(): void {
