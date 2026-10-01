@@ -1,0 +1,46 @@
+# Offline policy replay for the polytician battery: a fictional
+# organisation, the namespace readers in namespace-readers.json (set
+# POLYTICIAN_NAMESPACE_READERS to its absolute path), and replay-simulated
+# review. Run with `npm run appa:check` from the repository root.
+include = ["../polytician/appa.toml"]
+
+[policy]
+version = 2
+
+[policy.audience]
+self = ["replay:viewer"]
+internal = ["replay:members"]
+
+[[policy.authority]]
+name = "polytician-operator"
+# Deliberately cannot widen an audience: a namespace's data stays with its readers.
+permits = { trust_below = "trusted", attention = ["polytician-review"] }
+
+# This tool brings in text written outside the organisation.
+[[policy.tool]]
+name = "mcp/web/fetch"
+delta = { trust = "suspicious" }
+
+# This tool tests the trust of a polytician result.
+[[policy.tool]]
+name = "mcp/shell/run_command"
+requires = { trust = "trusted" }
+delta = {}
+
+# This tool tests who can receive a polytician result.
+[[policy.tool]]
+name = "mcp/mail/send"
+requires = { audience = { contains = ["$to"] } }
+delta = {}
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 1048576
+
+[externals.authorities.polytician-operator]
+builtin = "hitl"
+
+# This fixed roster is only a replay fixture, never a membership resolver.
+[externals.audience.replay]
+command = ["python3", "-c", 'import json, sys; r = json.load(sys.stdin); s = r["artifact"]["selector"]; print(json.dumps({"version": 1, "answer": {"members": ["alice@corp.example"] if s == "viewer" else ["alice@corp.example", "bob@corp.example", "carol@corp.example"]}}))']
+selectors = [{ template = "viewer", feeds = "self" }, { template = "members", feeds = "internal" }]

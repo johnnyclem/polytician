@@ -1,0 +1,18 @@
+schema = 1
+name = "polytician"
+description = "Rules for the Polytician MCP server's 20 tools: namespaces as label compartments, reads labelled with the namespace's readers, writes from trusted data its readers may see, reviewed imports and off-box AgentVault calls, plus the polytician audience source."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["polytician"]
+helpers = ["audience-source.py"]
+benefit = "APPA reads who may see each Polytician namespace from a file you keep. With this, memory read from one namespace flows only to its readers and is never written into a namespace with other readers."
+setup = [
+  "Write a JSON file mapping each namespace to its readers' email addresses, for example `{\"version\": 1, \"namespaces\": {\"default\": [\"you@example.com\"]}}`; list every namespace the server serves, `default` included.",
+  "Set `POLYTICIAN_NAMESPACE_READERS` to the file's absolute path in the environment APPA runs in.",
+  "Bind the server you registered as Polytician: `appa battery install polytician --server <server-name>`.",
+]
+
+[battery.readiness]
+required_executables = ["python3"]

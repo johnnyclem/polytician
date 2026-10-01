@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "namespaces": {
+    "default": ["alice@corp.example", "bob@corp.example"],
+    "team": ["alice@corp.example", "bob@corp.example"],
+    "finance": ["alice@corp.example"],
+    "ops:oncall": ["alice@corp.example", "carol@corp.example"]
+  }
+}

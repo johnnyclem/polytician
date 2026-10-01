@@ -1,0 +1,46 @@
+# From a trusted session: content written outside this trajectory, or
+# content leaving the machine, needs the polytician-review mark.
+
+mcp/polytician/list_backups {
+}
+expect allow
+
+mcp/polytician/export_backup {
+}
+expect allow
+
+mcp/polytician/import_backup {
+  file: "polytician-backup-2026-10-01T00-00-00-000Z-00000000.jsonl"
+}
+expect authority polytician-operator
+
+mcp/polytician/vault_memory_pull {
+  namespace: "team"
+}
+expect authority polytician-operator
+
+mcp/polytician/vault_memory_push {
+  conceptId: "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+  namespace: "team"
+}
+expect authority polytician-operator
+
+mcp/polytician/vault_archive_concept {
+  conceptId: "6f9619ff-8b86-4011-b42d-00c04fc964ff"
+}
+expect authority polytician-operator
+
+# Saving an inference answer into memory is reviewed too.
+mcp/polytician/vault_infer {
+  prompt: "Summarize the MCP specification."
+  saveAsConceptNamespace: "team"
+}
+expect authority polytician-operator
+
+# The answer was written outside the organisation, so the trajectory is
+# now suspicious.
+mcp/polytician/save_concept {
+  namespace: "team"
+  markdown: "MCP summary"
+}
+expect authority polytician-operator

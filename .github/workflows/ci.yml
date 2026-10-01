@@ -28,6 +28,9 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run format:check
+      # The OpenAPPA battery: its audience source's Python tests, plus
+      # `appa describe --check` and `appa replay` when appa (0.30.0) is installed.
+      - run: npm run appa:check
 
   test:
     name: Test (Node ${{ matrix.node-version }})

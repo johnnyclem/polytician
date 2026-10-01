@@ -327,7 +327,7 @@ A namespace scopes every tool call. `save_concept`, `read_concept`, `delete_conc
 
 `POLYTICIAN_NAMESPACES` is the operator's allowlist. When it is set to a list, calls naming any other namespace (including the implicit `"default"`) are `NAMESPACE_DENIED`, and `crossNamespace` search spans exactly the list. `*` allows every namespace and lets `crossNamespace` span them all. Unset allows every namespace and refuses `crossNamespace`.
 
-**Boundary:** the namespace is chosen by the caller. Polytician does not authenticate callers, so the allowlist bounds which namespaces a server exposes, but it does not stop one client of that server from naming another client's namespace. To isolate agents from each other, give each one its own server process with its own `POLYTICIAN_NAMESPACES`, or put a policy layer in front of the tools (for example an OpenAPPA battery keyed on the `namespace` argument).
+**Boundary:** the namespace is chosen by the caller. Polytician does not authenticate callers, so the allowlist bounds which namespaces a server exposes, but it does not stop one client of that server from naming another client's namespace. To isolate agents from each other, give each one its own server process with its own `POLYTICIAN_NAMESPACES`, or put a policy layer in front of the tools: the [OpenAPPA battery](integrations/openappa/) in this repository labels every call with the readers of the namespace it names, so data read from one namespace reaches only that namespace's readers and cannot be written into a namespace with other readers (on the trajectories OpenAPPA protects).
 
 ---
 
@@ -516,6 +516,7 @@ polytician/
 │   ├── mcp/tools/              # export_backup / import_backup / list_backups
 │   ├── polyvault/ & lib/polyvault/  # PolyVault (experimental, library only)
 │   └── integrations/agent-vault/    # AgentVault config, providers, vault_* tools
+├── integrations/openappa/      # OpenAPPA battery (namespaces as label compartments) + replay traces
 ├── bin/agentvault-sync.ts      # Standalone backup/restore/sync CLI
 ├── scripts/smoke-http.mjs      # Save + search smoke test against a running HTTP server
 ├── tests/                      # vitest suite (~35 files: tools, storage, polyvault, concurrency)
@@ -531,6 +532,7 @@ npm test             # vitest run — tools, storage, concurrency, PolyVault, en
 npm run test:watch
 npm run quality      # lint + typecheck + format:check
 npm run quality:fix  # lint:fix + format
+npm run appa:check   # OpenAPPA battery: audience-source tests; describe --check + replay when appa is on PATH
 ```
 
 ### Adding a New Tool
