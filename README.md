@@ -1,7 +1,6 @@
 # Polytician
 
 [![CI](https://github.com/johnnyclem/polytician/actions/workflows/ci.yml/badge.svg)](https://github.com/johnnyclem/polytician/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/polytician.svg)](https://www.npmjs.com/package/polytician)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#requirements)
 
@@ -19,7 +18,7 @@ Everything runs on your machine. Embeddings are generated in-process; there's no
 - 🗂️ **Namespaces + optimistic concurrency** — every tool call is scoped to a namespace, and an operator allowlist (`POLYTICIAN_NAMESPACES`) limits which ones a server serves (see [Namespaces](#namespaces) for exactly what that does and does not isolate). `expectedVersion` is checked in the same statement that writes, so of two concurrent writers holding the same version exactly one succeeds
 - 🔌 **Optional LLM + NLP** — the conversions that generate content (`markdown→thoughtform`, `vector→markdown`, `vector→thoughtform`) use [AgentVault](#agentvault-integration) inference when you opt in with `POLYTICIAN_LLM_PROVIDER=agentvault`, or a rule-based NLP pipeline for `markdown→thoughtform`; nothing leaves the machine unless you configure it to
 - 🧳 **Portable backups** — `export_backup` / `import_backup` write and restore every namespace (vectors, tags, thoughtforms and provenance included) as one versioned JSONL file, optionally AES-256-GCM encrypted, with a checksum that detects truncation and edits
-- 🚀 **Local or shared** — one Node process per MCP client over stdio (SQLite by default), or one shared server over MCP Streamable HTTP (`--http`, bearer token) with Docker Compose and Kubernetes manifests for a Postgres-backed deployment
+- 🚀 **Local or shared** — one Node process per MCP client over stdio (SQLite by default), or one shared server over MCP Streamable HTTP (`--http`, bearer token) with Docker Compose and Kubernetes manifests for a Postgres-backed deployment. Several replicas can serve one store only on Postgres; a SQLite store belongs to one process
 
 ---
 
@@ -87,6 +86,8 @@ Everything runs in the one Node process: save, read, search, and the non-LLM con
 
 ## Quick Start
 
+Polytician is not published to npm; run it from a checkout:
+
 ```bash
 git clone https://github.com/johnnyclem/polytician.git
 cd polytician
@@ -136,7 +137,7 @@ In the config file, string values may reference environment variables as `${NAME
 
 | Variable | Default | Description |
 |----------|---------|--------------|
-| `POLYTICIAN_DATA_DIR` | `~/.polytician` | Root directory for the SQLite DB and cached embedding model |
+| `POLYTICIAN_DATA_DIR` | `~/.polytician` | Root directory for the SQLite DB, the cached embedding model, backups, the backup key file and the generated HTTP token |
 | `POLYTICIAN_HEALTH_PORT` | unset (off) | stdio mode only: serve `GET /health` and `/health/live` on this port. Off by default, so several stdio servers (one per MCP client) never compete for a port; a port that is taken is logged and the MCP server keeps running |
 | `POLYTICIAN_HEALTH_HOST` | `127.0.0.1` | Interface the stdio-mode health endpoint binds |
 | `POLYTICIAN_TRANSPORT` | `stdio` | `stdio` or `http`; `--http` is the same as `http`. See [HTTP transport](#http-transport) |
@@ -268,11 +269,11 @@ Registered only when `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` are set
 
 | Tool | Purpose |
 |---|---|
-| `vault_infer` | Run a prompt through AgentVault's inference fallback chain (Bittensor → Venice → local), optionally saving the result as a concept |
+| `vault_infer` | Run a prompt through AgentVault's inference chain, optionally saving the result as a concept (provenance origin `llm`) |
 | `vault_memory_push` | Push a concept's markdown/thoughtform to AgentVault's `memory_repo` canister |
 | `vault_memory_pull` | Pull `concepts/<uuid>/markdown` entries from a `memory_repo` branch into one namespace, last write wins: an entry replaces a local concept only if its `updatedAt` is newer, entries recorded for another namespace are skipped, and every skipped entry is reported with a reason |
 | `vault_archive_concept` | Only when archival is enabled (see below). Archive a tagged concept to Arweave, encrypted, returning a transaction ID/URL |
-| `vault_get_secret` | Fetch secret **metadata** (name, provider, rotation date, length) — never the raw value |
+| `vault_get_secret` | Return secret **metadata** (name, provider, rotation date, length). Polytician fetches the secret from AgentVault to measure it, but never returns or logs the value |
 | `vault_memory_repo_log` | Inspect the `memory_repo` branch head and entry state |
 
 ---
@@ -335,7 +336,7 @@ A namespace scopes every tool call. `save_concept`, `read_concept`, `delete_conc
 
 ### HTTP transport
 
-`node dist/index.js --http` (or `POLYTICIAN_TRANSPORT=http`) serves MCP over [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) instead of stdio, so several clients can share one server:
+`node dist/index.js --http` (or `POLYTICIAN_TRANSPORT=http`) serves MCP over [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http) instead of stdio, so several clients can share one server. Both transports come from `@modelcontextprotocol/sdk` 1.x, which negotiates MCP protocol revisions 2024-11-05 through 2025-11-25; the stateless 2026-07-28 revision is not served yet. The HTTP server answers on one port:
 
 - `POST /mcp` — MCP JSON-RPC. The server is stateless (no `Mcp-Session-Id`; each request gets a fresh MCP server over the shared database), so replicas behind a load balancer need no session affinity. `GET` and `DELETE` on `/mcp` return `405`. Requests are capped at 16 MiB.
 - `GET /health` — readiness: `200` when the database and the vector index answer, `503` otherwise. The body says only `ok`/`error` per check; details go to the server log.
@@ -383,7 +384,7 @@ kubectl apply -f k8s/polytician.yml
 kubectl apply -f k8s/networkpolicy.yml
 ```
 
-`k8s/polytician.yml` runs 2+ replicas of the HTTP transport behind a `ClusterIP` service on port 8788, all sharing the Postgres store (each write updates the row and its vector in one transaction, so there is no index sync between replicas). Readiness probes `/health`, liveness `/health/live`, so a database outage takes pods out of the service without restarting them. Pods run as non-root with a read-only root filesystem, no capabilities and the `RuntimeDefault` seccomp profile. `k8s/networkpolicy.yml` admits only pods labelled `polytician-client: "true"` to Polytician and only Polytician to Postgres; Polytician's egress is limited to Postgres, DNS and HTTPS (for the model download).
+`k8s/polytician.yml` runs 2+ replicas of the HTTP transport behind a `ClusterIP` service on port 8788, all sharing the Postgres store. Replicas hold no state of their own that a request depends on: the transport is stateless, each write updates the row and its vector in one transaction with the `expectedVersion` check in the same statement, and schema migrations run under an advisory lock. Each pod's `/data` is an `emptyDir` holding only the model cache, so a file written by `export_backup` (or auto-backup) lands in one pod and is lost with it; back up a Kubernetes deployment with the `agentvault-sync` CLI pointed at the database (see [Backup, Restore & Encryption](#backup-restore--encryption)) or with `pg_dump`. Readiness probes `/health`, liveness `/health/live`, so a database outage takes pods out of the service without restarting them. Pods run as non-root with a read-only root filesystem, no capabilities and the `RuntimeDefault` seccomp profile. `k8s/networkpolicy.yml` admits only pods labelled `polytician-client: "true"` to Polytician and only Polytician to Postgres; Polytician's egress is limited to Postgres, DNS and HTTPS (for the model download).
 
 ### systemd / PM2
 
@@ -412,7 +413,7 @@ Backups are files in `<dataDir>/backups` (`~/.polytician/backups` by default; th
 - **Integrity boundary:** the footer checksum detects truncation and accidental edits, and the GCM tag detects any change to an encrypted body. Neither is a signature: anyone who holds the file (and, for encrypted files, the key) can write a backup that verifies.
 - **Auto-backup** is off by default. Set `POLYTICIAN_BACKUP_THRESHOLD=N` to write a full backup after every N saves (a burst of saves, such as a batch or an import, triggers one backup), keeping the newest `POLYTICIAN_BACKUP_RETAIN` (default 10).
 
-The CLI runs the same export and import outside an MCP client. As an operator tool it accepts any `--out` / `--file` path:
+The CLI runs the same export and import outside an MCP client, from a checkout (it is not part of the build or the Docker image). It uses the server's configuration, so with `POLYTICIAN_DB_BACKEND=postgres` and `POLYTICIAN_POSTGRES_URL` it backs up and restores a Postgres store. As an operator tool it accepts any `--out` / `--file` path:
 
 ```bash
 npx tsx bin/agentvault-sync.ts backup  [--out backup.jsonl] [--namespace work] [--encrypt]
@@ -420,13 +421,15 @@ npx tsx bin/agentvault-sync.ts restore --file backup.jsonl [--on-conflict newer|
 npx tsx bin/agentvault-sync.ts sync    --direction bidirectional
 ```
 
+[`docs/polyvault/runbook.md`](docs/polyvault/runbook.md#restore-drill-procedure) has a restore drill for these files that restores into a scratch store and never touches the live one.
+
 **PolyVault is experimental.** `src/polyvault/`, `src/lib/polyvault/` and `src/commands/polyvault/` implement a separate, chunked backup format for an Internet Computer canister (`src/agentvault_polyvault/`), but they are a library only: no shipped command, tool or startup path calls them, and their interfaces may change in a minor release. Use the backup files above for backups. See [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md).
 
 ---
 
 ## AgentVault Integration
 
-Polytician doubles as a semantic-memory source, on-chain backup target, and inference/secrets provider for [AgentVault](https://github.com/johnnyclem/agentvault)'s orchestrator, via the `vault_*` tools above.
+[AgentVault](https://github.com/johnnyclem/agentvault) and Polytician connect in two directions. AgentVault's orchestrator can call Polytician's MCP tools as a semantic-memory store (see [below](#calling-polytician-from-agentvaults-orchestrator)). And, when the operator configures it, Polytician uses AgentVault: the `vault_*` tools above, memory sync with AgentVault's `memory_repo` canister, Arweave archival through AgentVault, and AgentVault's inference chain for LLM conversions.
 
 Configuring AgentVault does not by itself send concept content anywhere. Each off-box path is a separate opt-in, and the server logs the endpoint and which paths are on at startup:
 
@@ -519,7 +522,7 @@ polytician/
 ├── integrations/openappa/      # OpenAPPA battery (namespaces as label compartments) + replay traces
 ├── bin/agentvault-sync.ts      # Standalone backup/restore/sync CLI
 ├── scripts/smoke-http.mjs      # Save + search smoke test against a running HTTP server
-├── tests/                      # vitest suite (~35 files: tools, storage, polyvault, concurrency)
+├── tests/                      # vitest suite (48 files: tools, storage, backups, polyvault, concurrency; Postgres tests need POLYTICIAN_TEST_POSTGRES_URL)
 ├── Dockerfile, docker-compose.yml, k8s/  # HTTP transport + Postgres deployment
 └── docs/                       # PolyVault spec/runbook, ecosystem evaluation
 ```

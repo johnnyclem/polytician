@@ -42,7 +42,7 @@ All paths below are relative to this repo (`johnnyclem/polytician`) and were rea
 | `src/integrations/agent-vault/tools/vault-tools.ts` | 326 | Registers up to 6 MCP tools: `vault_infer`, `vault_memory_push`, `vault_memory_pull`, `vault_get_secret`, `vault_memory_repo_log`, and `vault_archive_concept` when archival is enabled |
 | `src/mcp/tools/backup.ts` | — | `export_backup` / `import_backup` / `list_backups` (replaced 2.x's `agentvault_backup` and `vault_restore`) |
 | `docs/polyvault/spec-v1.md` | — | Full spec for **PolyVault**: encrypted (AES-256-GCM), gzip-compressed, chunked (≤1MB), deterministically-conflict-resolved backup/restore of ThoughtForms to an IC canister |
-| `docs/polyvault/runbook.md` | — | Operator runbook: exit codes, failure matrix, restore drill procedure |
+| `docs/polyvault/runbook.md` | — | PolyVault library exit codes and failure matrix, and a restore drill for the JSONL backup files (restores into a scratch store) |
 | `docs/polyvault-guardrails.md` | — | Non-negotiable implementation policy (fail-closed security, no plaintext-on-chain, idempotency requirements) |
 | `AGENTVAULT_COMPATIBILITY_PRD.md` | 646 | The spec (written from this repo) of what AgentVault needs to build to support Polytician — see status table below |
 | `tests/agentvault-integration.test.ts` | 156 | 12 tests: response unwrapping, path-allowlist security, auth |

@@ -1,5 +1,7 @@
 # PolyVault Operator Runbook
 
+PolyVault is experimental and library-only: no shipped command, tool or startup path calls it. The exit codes and log lines below are what `runBackup`, `runRestore`, `runRebase` and `runMerge` in `src/commands/polyvault/` return and log when your own code calls them. Backups of a running Polytician are the JSONL backup files (`export_backup`, `agentvault-sync backup`); the [restore drill](#restore-drill-procedure) below exercises those.
+
 ## Quick Reference
 
 | Exit Code | Category | Meaning |
@@ -25,7 +27,8 @@
 1. Validate your input JSON against the ThoughtForm v1.0 schema.
 2. Check that all timestamps are positive integers (epoch ms).
 3. Ensure `schemaVersion` is `"1.0"`.
-4. Run with `LOG_LEVEL=debug` for per-record validation details.
+4. Ensure each `metadata.contentHash` equals `computeContentHash()` of its content (`withContentHash()` fills it in); a stale producer hash is rejected.
+5. Run with `LOG_LEVEL=debug` for per-record validation details.
 
 ### ERR_AUTH (exit 3)
 
@@ -75,66 +78,60 @@
 
 ## Restore Drill Procedure
 
-Use this procedure to verify your backup/restore pipeline works end-to-end.
+There is no PolyVault command to drill: PolyVault is a library, and `src/index.ts` ignores its arguments and starts the MCP server. (The 2.x version of this drill ran `npx tsx src/index.ts polyvault backup|restore`, which only started a server, after deleting every row of a database path the server does not use.) This drill exercises the backups Polytician actually ships, the JSONL backup files written by `export_backup` and `agentvault-sync`, and restores into a scratch store, so it never modifies your live data.
+
+To drill PolyVault itself, call `runBackupE2E` / `runRestoreE2E` (`src/commands/polyvault/e2e.ts`) from your own code against a local replica; `tests/polyvault-e2e.test.ts` shows the calls.
 
 ### Prerequisites
-- Local dfx replica running (`dfx start --background`)
-- PolyVault canister deployed
-- At least one backup completed
+
+- A checkout of the polytician repository with `npm install` done (the CLI runs through `tsx`), and `jq`.
+- The environment the server runs with (`POLYTICIAN_DATA_DIR`, `POLYTICIAN_DB_BACKEND`, `POLYTICIAN_POSTGRES_URL`, and for encrypted backups `POLYTICIAN_BACKUP_KEY` or the key file), so the backup reads the live store.
 
 ### Steps
 
-1. **Verify existing state**
+1. **Back up the live store**
    ```bash
-   # Count current concepts in SQLite
-   sqlite3 data/polytician.db "SELECT COUNT(*) FROM concepts"
+   DRILL=$(mktemp -d)
+   npx tsx bin/agentvault-sync.ts backup --out "$DRILL/backup.jsonl" | tee "$DRILL/backup.log"
+   # add --encrypt (or keep POLYTICIAN_ENCRYPT=true) to drill an encrypted backup
+   ```
+   Verify: it prints `wrote N concepts (<namespace>=<count>, ...)` covering every namespace you expect (an error is printed instead on failure; `tee` hides the exit code).
+
+2. **Restore into a scratch store** (SQLite in the drill directory; the format does not depend on the backend, so this works for a Postgres store too)
+   ```bash
+   LIVE_DIR="${POLYTICIAN_DATA_DIR:-$HOME/.polytician}"
+   scratch() {
+     POLYTICIAN_DATA_DIR="$DRILL/data" POLYTICIAN_DB_BACKEND=sqlite \
+     POLYTICIAN_BACKUP_KEY_FILE="${POLYTICIAN_BACKUP_KEY_FILE:-$LIVE_DIR/backup.key}" \
+       npx tsx bin/agentvault-sync.ts "$@"
+   }
+   scratch restore --file "$DRILL/backup.jsonl" | tee "$DRILL/restore.log"
+   ```
+   `POLYTICIAN_BACKUP_KEY_FILE` keeps pointing at the live key file, whose default location moves with `POLYTICIAN_DATA_DIR`. Verify: it prints `imported N concepts (N new, 0 replaced), skipped 0`.
+
+3. **Compare a fresh export of the scratch store with the backup**
+   ```bash
+   scratch backup --out "$DRILL/roundtrip.jsonl" | tee "$DRILL/roundtrip.log"
+   diff <(grep -o 'wrote [0-9]* concepts[^/]*' "$DRILL/backup.log") \
+        <(grep -o 'wrote [0-9]* concepts[^/]*' "$DRILL/roundtrip.log") && echo "counts match"
+   # Plaintext backups only: every concept line round-trips unchanged.
+   diff <(sed '1d;$d' "$DRILL/backup.jsonl" | jq -Sc . | sort) \
+        <(sed '1d;$d' "$DRILL/roundtrip.jsonl" | jq -Sc . | sort) && echo "concepts match"
    ```
 
-2. **Create a fresh backup**
+4. **Check that corruption is detected**
    ```bash
-   npx tsx src/index.ts polyvault backup \
-     --from data/thoughtforms.json \
-     --compress gzip \
-     --out /tmp/backup-manifest.json
+   sed '2s/./X/' "$DRILL/backup.jsonl" > "$DRILL/tampered.jsonl"
+   scratch restore --file "$DRILL/tampered.jsonl"; echo "exit=$?"
    ```
-   Verify: exit code 0, manifest shows `thoughtformCount > 0`.
+   Verify: exit 1, with `Backup line 2 is not valid JSON` or `Backup checksum mismatch` (plaintext) or `authentication tag mismatch` (encrypted), and nothing restored.
 
-3. **Drop local state** (destructive -- confirm before running)
+5. **Clean up.** A plaintext backup holds your memory in clear text.
    ```bash
-   # Back up current DB first
-   cp data/polytician.db data/polytician.db.bak
-   sqlite3 data/polytician.db "DELETE FROM concepts"
+   rm -rf "$DRILL"
    ```
 
-4. **Run full restore**
-   ```bash
-   npx tsx src/index.ts polyvault restore \
-     --to /tmp/restored.json \
-     --mode full \
-     --compression gzip \
-     --out /tmp/restore-manifest.json
-   ```
-   Verify: exit code 0, manifest `thoughtformCount` matches backup.
-
-5. **Verify data integrity**
-   ```bash
-   # Compare restored count to backup count
-   cat /tmp/restore-manifest.json | jq '.thoughtformCount'
-   cat /tmp/backup-manifest.json | jq '.thoughtformCount'
-   ```
-
-6. **Verify no sensitive data in logs**
-   ```bash
-   # Check that no rawText appeared in stderr output
-   LOG_LEVEL=debug npx tsx src/index.ts polyvault restore \
-     --to /tmp/restored.json --mode full --compression gzip 2>/tmp/restore.log
-   grep -c "rawText" /tmp/restore.log  # Should be 0 or only show [REDACTED]
-   ```
-
-7. **Restore from backup** (if drill failed)
-   ```bash
-   cp data/polytician.db.bak data/polytician.db
-   ```
+To restore for real, run `npx tsx bin/agentvault-sync.ts restore --file <backup>` against the live store (it keeps a local concept that is as new as or newer than the backup copy unless `--on-conflict overwrite`), or put the file in `<dataDir>/backups` and call the `import_backup` tool.
 
 ## Observability
 

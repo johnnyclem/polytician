@@ -1,6 +1,17 @@
 # Migrating to Polytician 3.0
 
-This guide covers every breaking change in 3.0 and what to do about it. The full list of changes is in [CHANGELOG.md](CHANGELOG.md).
+This guide covers every breaking change in 3.0 and what to do about it. The full list of changes, with the audit finding (`POLY-NN`) behind each, is in [CHANGELOG.md](CHANGELOG.md).
+
+## Upgrade checklist
+
+1. **Runtime:** Node.js 22 or newer; reinstall dependencies with install scripts enabled (see "Before you upgrade").
+2. **Back up the 2.x store** (copy `concepts.db` or `pg_dump`); on Postgres, check pgvector ≥ 0.5.
+3. **Configuration:** move a `.polytician.json` / `~/.polytician.json` to `~/.polytician/config.json` (or pass `--config`), and remove the settings 3.0 dropped (`POLYTICIAN_SIDECAR_URL`, `POLYTICIAN_ASYNC_INDEX_SYNC`, `POLYTICIAN_NODE_ID`, `POLYTICIAN_EXTERNAL_STATE_URL`, `POLYTICIAN_VECTOR_INDEX_URL`, `POLYTICIAN_LLM_MODEL`, `POLYTICIAN_LLM_API_KEY`, `agentVault.secrets`). See "Operators".
+4. **Keys and opt-ins:** with `POLYTICIAN_ENCRYPT` or archival enabled, create a backup key first, or the server will not start. Set `POLYTICIAN_LLM_PROVIDER=agentvault` if you relied on implicit AgentVault inference.
+5. **Ports:** nothing listens on 8787 any more; point health probes and deployments at 8788 (see "Ports").
+6. **Start 3.0 once.** It migrates the schema in place (see "What the first start does"); 2.x cannot open the database afterwards.
+7. **Make old concepts searchable** and take a fresh 3.0 backup (see "Embeddings and re-indexing" and "Backups and encryption").
+8. **Update clients** for the tool contract changes: `{ results }` and `score` from `search_concepts`, strict arguments, namespaces, `VERSION_CONFLICT` and error codes (see "Tool callers").
 
 ## Before you upgrade
 
@@ -15,9 +26,18 @@ This guide covers every breaking change in 3.0 and what to do about it. The full
 | SQLite | Rebuilds `concept_vectors` from `concepts.embedding` with a `namespace` partition key and `distance_metric=cosine`, and adds the `concepts.provenance`, `assertion_status` and `ledger_ref` columns. |
 | Postgres | Under an advisory lock: adds `concepts.provenance`, `assertion_status` and `ledger_ref`, drops `idx_concept_vectors_embedding` (IVFFlat, L2) and creates `idx_concept_vectors_embedding_cosine` (HNSW, `vector_cosine_ops`). Re-indexes rows whose vector was missing and records `schema_version = 3` in `metadata`. |
 
-Both backends also add `concepts.embedding_model` and label every existing vector, once, with the configured `POLYTICIAN_EMBEDDING_MODEL` (2.x recorded no model). **If you changed `POLYTICIAN_EMBEDDING_MODEL` in 2.x,** start 3.0 the first time with the model your vectors were made with, then change it and run `reembed_concepts` per namespace.
+Both backends also add `concepts.embedding_model` (with a partial index on `(namespace, embedding_model)`) and label every existing vector, once, with the configured `POLYTICIAN_EMBEDDING_MODEL` (2.x recorded no model; `legacy_vectors_labelled` in `metadata` records that this ran). See "Embeddings and re-indexing" if you changed the model in 2.x.
 
 On both backends, stored embeddings that could never be searched are set to `NULL`: wrong byte length (left by a failed, non-atomic 2.x save), non-finite, or all zero. The concept keeps its markdown and thoughtform. Re-embed it with `convert_concept { from: "markdown", to: "vector" }`, or re-save it.
+
+On Postgres the HNSW index is built during this migration, inside the transaction that holds the migration's advisory lock. On a large table the build takes a while (raise `maintenance_work_mem` to speed it up), and other replicas starting meanwhile wait for it.
+
+## Embeddings and re-indexing
+
+- **Library.** 3.0 embeds with `@huggingface/transformers` 4.x instead of `@xenova/transformers` 2.x. The default model is the same (`Xenova/all-MiniLM-L6-v2`, quantized `q8`), cached in `<dataDir>/models`, so vectors made by 2.x stay comparable with new ones and need no re-embedding. A custom `POLYTICIAN_EMBEDDING_MODEL` must be one `@huggingface/transformers` can load (with a `q8` ONNX export) and must output 384-dimensional vectors; 2.x truncated larger outputs, 3.0 refuses them. If the first start cannot download the model (offline, proxy), the next embedding retries the download instead of failing until restart.
+- **The vector index is rebuilt for you** by the first start (cosine distance, namespace partitioning); nothing needs to be re-embedded for that.
+- **Concepts saved by 2.x without a vector are still not searchable.** 2.x did not embed saved markdown (3.0 does), so a 2.x concept stays out of search results until it gets a vector. `list_concepts` shows them with `representations.vector: false`; give each one a vector with `convert_concept { id, namespace, from: "markdown", to: "vector" }` (or `from: "thoughtform"` for a thoughtform-only concept). `reembed_concepts` does not cover them: it only replaces vectors made by another model.
+- **If you changed `POLYTICIAN_EMBEDDING_MODEL` in 2.x,** start 3.0 the first time with the model your vectors were made with (the start labels every existing vector with the configured model), then switch to the model you want and run `reembed_concepts { namespace }` per namespace, repeating while `remaining` > 0. Until then, searches over those namespaces fail with `EMBEDDING_MODEL_MISMATCH` rather than ranking incomparable vectors.
 
 ## Tool callers (MCP clients, agents, AgentVault)
 
@@ -106,6 +126,16 @@ Every tool error is returned as `{ "error": "...", "code": "..." }` in `content[
 
 ## Operators
 
+### Ports
+
+| | 2.x | 3.0 |
+|---|---|---|
+| stdio server | `/health` always on `0.0.0.0:8787` | No port unless `POLYTICIAN_HEALTH_PORT` is set; then `/health` and `/health/live` on `127.0.0.1` (`POLYTICIAN_HEALTH_HOST`) |
+| HTTP transport (`--http`, Docker, Compose, Kubernetes) | none (only `/health` on 8787) | MCP on `POST /mcp` plus `/health` and `/health/live`, on `127.0.0.1:8788` (`POLYTICIAN_HTTP_HOST` / `POLYTICIAN_HTTP_PORT`; the image binds `0.0.0.0:8788` inside the container) |
+| Python sidecar | `0.0.0.0:5001` | removed |
+
+8787 belongs to stenographer's REST daemon in the suite; 8788 is Polytician's. Update monitors, firewall rules, Service and probe ports, and `-p` mappings accordingly.
+
 - **Health endpoint.** A stdio server no longer opens a port. If a monitor or AgentVault's packaging probes `http://localhost:8787/health`, set `POLYTICIAN_HEALTH_PORT` (8788 is the suite default; 8787 is stenographer's) and point the probe at it; it binds `127.0.0.1` unless `POLYTICIAN_HEALTH_HOST` says otherwise. Use `/health/live` for liveness and `/health` for readiness. Parse `checks.database` / `checks.vector_index`; `checks.sidecar` and error messages are gone.
 - **Python sidecar.** Delete the sidecar service, `POLYTICIAN_SIDECAR_URL`, and any `python-sidecar` image or `k8s/sidecar.yml` deployment. Nothing replaces it: search never used its FAISS index.
 - **Remove `POLYTICIAN_NODE_ID`, `POLYTICIAN_EXTERNAL_STATE_URL` and `POLYTICIAN_VECTOR_INDEX_URL`** (`distributed.*`). They were never read.
@@ -131,6 +161,8 @@ Every tool error is returned as `{ "error": "...", "code": "..." }` in `content[
 
   (or set `POLYTICIAN_BACKUP_KEY`). Store a copy of the key somewhere other than this machine. An encrypted backup cannot be restored without it.
 - **`agentvault-sync backup`** now writes every namespace by default (pass `--namespace` for one) in JSONL, to `<dataDir>/backups` unless you pass `--out`. Scripts that parsed the 2.x JSON output need updating. `restore` keeps newer local copies unless `--on-conflict overwrite`.
+- **Kubernetes:** each pod's `/data` is an `emptyDir`, so a file `export_backup` or auto-backup writes there is lost with the pod. Back up with `agentvault-sync backup` run from a checkout with `POLYTICIAN_DB_BACKEND=postgres` and `POLYTICIAN_POSTGRES_URL` (in 2.x the CLI could not open a Postgres store at all), or with `pg_dump`.
+- Rehearse a restore with the drill in [`docs/polyvault/runbook.md`](docs/polyvault/runbook.md#restore-drill-procedure); it restores into a scratch store and never touches the live one.
 - The SQLite database file is set to mode `600` on start. If another local user or group needs to read it, grant that explicitly.
 
 ## Library users (`ConceptService`, `DatabaseAdapter`)

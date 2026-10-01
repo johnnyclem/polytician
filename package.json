@@ -1,6 +1,6 @@
 {
   "name": "polytician",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Local-first MCP server for shared semantic memory — store, retrieve, and convert concepts across vectors, markdown, and ThoughtForm representations",
   "type": "module",
   "main": "dist/index.js",
