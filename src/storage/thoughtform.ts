@@ -131,11 +131,18 @@ export async function deserializeAndUpsertBundle(json: string | Buffer): Promise
         continue;
       }
 
+      let provenance: Record<string, unknown> = {};
+      try {
+        provenance = JSON.parse(existing.provenance ?? '{}') as Record<string, unknown>;
+      } catch {
+        // Unreadable provenance is replaced.
+      }
       await adapter.updateConcept(tf.id, {
         updated_at: incomingUpdatedAt,
         thoughtform: JSON.stringify(tf),
         tags: JSON.stringify(tf.metadata.tags),
         version: existing.version + 1,
+        provenance: JSON.stringify({ ...provenance, thoughtform: { origin: 'import' } }),
       });
     } else {
       const now = incomingUpdatedAt;
@@ -151,6 +158,7 @@ export async function deserializeAndUpsertBundle(json: string | Buffer): Promise
         markdown: null,
         thoughtform: JSON.stringify(tf),
         embedding: null,
+        provenance: JSON.stringify({ thoughtform: { origin: 'import' } }),
       };
 
       await adapter.insertConcept(row);

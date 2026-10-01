@@ -34,7 +34,9 @@ const UPDATABLE_COLUMNS = new Set([
   'thoughtform',
   'embedding',
   'embedding_model',
-  'derived',
+  'provenance',
+  'assertion_status',
+  'ledger_ref',
 ]);
 
 /** metadata key recording that pre-3.0 vectors were labelled with a model. */
@@ -85,7 +87,9 @@ export class PostgresAdapter implements DatabaseAdapter {
           thoughtform TEXT,
           embedding BYTEA,
           embedding_model TEXT,
-          derived TEXT NOT NULL DEFAULT '{}'
+          provenance TEXT NOT NULL DEFAULT '{}',
+          assertion_status TEXT,
+          ledger_ref TEXT
         )
       `);
 
@@ -93,8 +97,10 @@ export class PostgresAdapter implements DatabaseAdapter {
       await client.query(`
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
-        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS derived TEXT NOT NULL DEFAULT '{}';
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS provenance TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS assertion_status TEXT;
+        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS ledger_ref TEXT;
       `);
 
       await client.query(`CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)`);
@@ -205,7 +211,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async findConcept(id: string): Promise<ConceptRow | null> {
     const result = await this.pool.query(
-      'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived FROM concepts WHERE id = $1',
+      'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, provenance, assertion_status, ledger_ref FROM concepts WHERE id = $1',
       [id]
     );
     if (result.rows.length === 0) return null;
@@ -238,8 +244,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       case 'insert': {
         const { row } = write;
         const inserted = await client.query(
-          `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, provenance, assertion_status, ledger_ref)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (id) DO NOTHING`,
           [
             row.id,
             row.namespace,
@@ -251,7 +257,9 @@ export class PostgresAdapter implements DatabaseAdapter {
             row.thoughtform,
             row.embedding,
             row.embedding ? (row.embedding_model ?? null) : null,
-            row.derived ?? '{}',
+            row.provenance ?? '{}',
+            row.assertion_status ?? null,
+            row.ledger_ref ?? null,
           ]
         );
         if (inserted.rowCount === 0) return false;
@@ -301,8 +309,8 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async insertConcept(row: ConceptRow): Promise<void> {
     await this.pool.query(
-      `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, provenance, assertion_status, ledger_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         row.id,
         row.namespace,
@@ -314,7 +322,9 @@ export class PostgresAdapter implements DatabaseAdapter {
         row.thoughtform,
         row.embedding,
         row.embedding ? (row.embedding_model ?? null) : null,
-        row.derived ?? '{}',
+        row.provenance ?? '{}',
+        row.assertion_status ?? null,
+        row.ledger_ref ?? null,
       ]
     );
   }
@@ -339,6 +349,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     offset: number;
     tags?: string[];
     namespace?: string;
+    assertionStatus?: readonly string[];
   }): Promise<{ rows: ListRow[]; total: number }> {
     const conditions: string[] = [];
     const queryParams: unknown[] = [];
@@ -355,6 +366,12 @@ export class PostgresAdapter implements DatabaseAdapter {
       queryParams.push(JSON.stringify(params.tags));
     }
 
+    if (params.assertionStatus) {
+      if (params.assertionStatus.length === 0) return { rows: [], total: 0 };
+      conditions.push(`assertion_status = ANY($${paramIdx++}::text[])`);
+      queryParams.push([...params.assertionStatus]);
+    }
+
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const countResult = await this.pool.query(
@@ -367,7 +384,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       `SELECT id, namespace, version, created_at, updated_at, tags,
               CASE WHEN markdown IS NOT NULL THEN 1 ELSE 0 END as has_md,
               CASE WHEN thoughtform IS NOT NULL THEN 1 ELSE 0 END as has_tf,
-              CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_vec
+              CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_vec,
+              assertion_status
        FROM concepts ${where}
        ORDER BY updated_at DESC
        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
@@ -385,6 +403,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         has_md: Number(r.has_md),
         has_tf: Number(r.has_tf),
         has_vec: Number(r.has_vec),
+        assertion_status: (r.assertion_status as string | null) ?? null,
       })),
       total: Number(countResult.rows[0].count),
     };
@@ -426,6 +445,11 @@ export class PostgresAdapter implements DatabaseAdapter {
     if (filter.tags && filter.tags.length > 0) {
       params.push(JSON.stringify(filter.tags));
       conditions.push(`c.tags::jsonb @> $${params.length}::jsonb`);
+    }
+    if (filter.assertionStatus) {
+      if (filter.assertionStatus.length === 0) return [];
+      params.push([...filter.assertionStatus]);
+      conditions.push(`c.assertion_status = ANY($${params.length}::text[])`);
     }
     params.push(k);
 
@@ -509,7 +533,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       `SELECT id, namespace, tags,
               CASE WHEN markdown IS NOT NULL THEN 1 ELSE 0 END as has_md,
               CASE WHEN thoughtform IS NOT NULL THEN 1 ELSE 0 END as has_tf,
-              CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_vec
+              CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_vec,
+              assertion_status
        FROM concepts WHERE id IN (${placeholders})`,
       ids
     );
@@ -521,6 +546,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       has_md: Number(r.has_md),
       has_tf: Number(r.has_tf),
       has_vec: Number(r.has_vec),
+      assertion_status: (r.assertion_status as string | null) ?? null,
     }));
   }
 
@@ -585,7 +611,9 @@ export class PostgresAdapter implements DatabaseAdapter {
       thoughtform: (row.thoughtform as string) ?? null,
       embedding: row.embedding ? Buffer.from(row.embedding as Buffer) : null,
       embedding_model: (row.embedding_model as string | null) ?? null,
-      derived: (row.derived as string) ?? '{}',
+      provenance: (row.provenance as string) ?? '{}',
+      assertion_status: (row.assertion_status as string | null) ?? null,
+      ledger_ref: (row.ledger_ref as string | null) ?? null,
     };
   }
 }

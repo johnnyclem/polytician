@@ -46,7 +46,7 @@ const vector = Array.from({ length: 384 }, (_, i) => (i === 7 ? 1 : 0));
 const saved = payload(
   await client.callTool({ name: 'save_concept', arguments: { embedding: vector, tags: ['smoke'] } })
 );
-const found = payload(
+const { results: found } = payload(
   await client.callTool({ name: 'search_concepts', arguments: { vector, k: 1 } })
 );
 if (found[0]?.id !== saved.id) fail(`vector search returned ${JSON.stringify(found)}`);
@@ -58,7 +58,7 @@ if (embed) {
       arguments: { markdown: 'Polytician smoke test: shared semantic memory over HTTP' },
     })
   );
-  const hits = payload(
+  const { results: hits } = payload(
     await client.callTool({
       name: 'search_concepts',
       arguments: { query: 'shared semantic memory', k: 1 },

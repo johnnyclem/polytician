@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
+  AssertionStatusSchema,
+  LedgerRefSchema,
   MarkdownSchema,
   NamespaceSchema,
-  ProvenanceSchema,
-  RepresentationTypeSchema,
+  ProvenanceMapSchema,
   TagsSchema,
-  type DerivedMap,
+  type AssertionStatus,
+  type ProvenanceMap,
 } from '../types/concept.js';
 import { StoredThoughtFormSchema, type StoredThoughtForm } from '../types/thoughtform.js';
 import { ConfigurationError, ValidationError } from '../errors/index.js';
@@ -18,7 +20,7 @@ import { CIPHER_NAME, newNonce, openBytes, sealBytes } from './seal.js';
  *
  * Plaintext:
  *   line 1      header   {"type":"header","format":"polytician-backup","formatVersion":1,...,"encryption":null}
- *   lines 2..n  concept  {"type":"concept","id":...,"tags":[...],"thoughtform":{...},"embedding":[...]}
+ *   lines 2..n  concept  {"type":"concept","id":...,"tags":[...],"thoughtform":{...},"embedding":[...],"provenance":{...},"assertionStatus":...}
  *   last line   footer   {"type":"footer","conceptCount":n,"namespaces":{...},"sha256":...}
  *
  * Encrypted: the header (with `encryption`) followed by one line holding
@@ -75,7 +77,9 @@ export const BackupRecordSchema = z
     markdown: MarkdownSchema.nullable(),
     thoughtform: StoredThoughtFormSchema.nullable(),
     embedding: z.array(z.number()).nullable(),
-    derived: z.record(RepresentationTypeSchema, ProvenanceSchema),
+    provenance: ProvenanceMapSchema,
+    assertionStatus: AssertionStatusSchema.nullable(),
+    ledgerRef: LedgerRefSchema.nullable(),
   })
   .strict();
 
@@ -90,7 +94,9 @@ export interface BackupRecord {
   markdown: string | null;
   thoughtform: StoredThoughtForm | null;
   embedding: number[] | null;
-  derived: DerivedMap;
+  provenance: ProvenanceMap;
+  assertionStatus: AssertionStatus | null;
+  ledgerRef: string | null;
 }
 
 export const BackupFooterSchema = z

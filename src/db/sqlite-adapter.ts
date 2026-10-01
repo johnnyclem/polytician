@@ -29,7 +29,9 @@ const UPDATABLE_COLUMNS = new Set([
   'thoughtform',
   'embedding',
   'embedding_model',
-  'derived',
+  'provenance',
+  'assertion_status',
+  'ledger_ref',
 ]);
 
 /** metadata key recording that pre-3.0 vectors were labelled with a model. */
@@ -87,7 +89,9 @@ export class SqliteAdapter implements DatabaseAdapter {
         thoughtform TEXT,
         embedding BLOB,
         embedding_model TEXT,
-        derived TEXT NOT NULL DEFAULT '{}'
+        provenance TEXT NOT NULL DEFAULT '{}',
+        assertion_status TEXT,
+        ledger_ref TEXT
       )
     `);
 
@@ -95,8 +99,10 @@ export class SqliteAdapter implements DatabaseAdapter {
     for (const column of [
       `namespace TEXT NOT NULL DEFAULT 'default'`,
       `version INTEGER NOT NULL DEFAULT 1`,
-      `derived TEXT NOT NULL DEFAULT '{}'`,
       `embedding_model TEXT`,
+      `provenance TEXT NOT NULL DEFAULT '{}'`,
+      `assertion_status TEXT`,
+      `ledger_ref TEXT`,
     ]) {
       try {
         this.db.exec(`ALTER TABLE concepts ADD COLUMN ${column}`);
@@ -179,7 +185,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     return (
       (this.db
         .prepare(
-          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived FROM concepts WHERE id = ?'
+          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, provenance, assertion_status, ledger_ref FROM concepts WHERE id = ?'
         )
         .get(id) as ConceptRow | undefined) ?? null
     );
@@ -207,8 +213,8 @@ export class SqliteAdapter implements DatabaseAdapter {
         const { row } = write;
         const inserted = this.db
           .prepare(
-            `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+            `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, provenance, assertion_status, ledger_ref)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
           )
           .run(
             row.id,
@@ -221,7 +227,9 @@ export class SqliteAdapter implements DatabaseAdapter {
             row.thoughtform,
             row.embedding,
             row.embedding ? (row.embedding_model ?? null) : null,
-            row.derived ?? '{}'
+            row.provenance ?? '{}',
+            row.assertion_status ?? null,
+            row.ledger_ref ?? null
           );
         if (inserted.changes === 0) return false;
         if (row.embedding) this.upsertVector(row.id, row.namespace, row.embedding);
@@ -266,8 +274,8 @@ export class SqliteAdapter implements DatabaseAdapter {
   insertConcept(row: ConceptRow): void {
     this.db
       .prepare(
-        `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, provenance, assertion_status, ledger_ref)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         row.id,
@@ -280,7 +288,9 @@ export class SqliteAdapter implements DatabaseAdapter {
         row.thoughtform,
         row.embedding,
         row.embedding ? (row.embedding_model ?? null) : null,
-        row.derived ?? '{}'
+        row.provenance ?? '{}',
+        row.assertion_status ?? null,
+        row.ledger_ref ?? null
       );
   }
 
@@ -297,7 +307,13 @@ export class SqliteAdapter implements DatabaseAdapter {
     this.db.prepare('DELETE FROM concepts WHERE id = ?').run(id);
   }
 
-  listConcepts(params: { limit: number; offset: number; tags?: string[]; namespace?: string }): {
+  listConcepts(params: {
+    limit: number;
+    offset: number;
+    tags?: string[];
+    namespace?: string;
+    assertionStatus?: readonly string[];
+  }): {
     rows: ListRow[];
     total: number;
   } {
@@ -314,6 +330,12 @@ export class SqliteAdapter implements DatabaseAdapter {
       queryParams.push(tag);
     }
 
+    if (params.assertionStatus) {
+      if (params.assertionStatus.length === 0) return { rows: [], total: 0 };
+      conditions.push(`assertion_status IN (${params.assertionStatus.map(() => '?').join(', ')})`);
+      queryParams.push(...params.assertionStatus);
+    }
+
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const countResult = this.db
@@ -322,7 +344,7 @@ export class SqliteAdapter implements DatabaseAdapter {
 
     const rows = this.db
       .prepare(
-        `SELECT id, namespace, version, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+        `SELECT id, namespace, version, created_at, updated_at, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec, assertion_status FROM concepts ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
       )
       .all(...queryParams, params.limit, params.offset) as ListRow[];
 
@@ -345,7 +367,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     const conditions = ['embedding MATCH ?', 'k = ?'];
     const params: unknown[] = [queryEmbedding, Math.min(k, MAX_KNN_K)];
 
-    // Both filters are constraints on the vec0 scan itself: `namespace` is the
+    // Every filter is a constraint on the vec0 scan itself: `namespace` is the
     // partition key and `concept_id IN (...)` restricts candidate rows, so the
     // KNN ranks only matching rows.
     if (filter.namespaces !== null) {
@@ -353,10 +375,22 @@ export class SqliteAdapter implements DatabaseAdapter {
       conditions.push(`namespace IN (${filter.namespaces.map(() => '?').join(', ')})`);
       params.push(...filter.namespaces);
     }
+    const rowConditions: string[] = [];
     if (filter.tags && filter.tags.length > 0) {
-      const tagConditions = filter.tags.map(() => tagClause('c.tags')).join(' AND ');
-      conditions.push(`concept_id IN (SELECT c.id FROM concepts c WHERE ${tagConditions})`);
+      rowConditions.push(...filter.tags.map(() => tagClause('c.tags')));
       params.push(...filter.tags);
+    }
+    if (filter.assertionStatus) {
+      if (filter.assertionStatus.length === 0) return [];
+      rowConditions.push(
+        `c.assertion_status IN (${filter.assertionStatus.map(() => '?').join(', ')})`
+      );
+      params.push(...filter.assertionStatus);
+    }
+    if (rowConditions.length > 0) {
+      conditions.push(
+        `concept_id IN (SELECT c.id FROM concepts c WHERE ${rowConditions.join(' AND ')})`
+      );
     }
 
     return this.db
@@ -411,7 +445,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     const placeholders = ids.map(() => '?').join(',');
     return this.db
       .prepare(
-        `SELECT id, namespace, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec
+        `SELECT id, namespace, tags, markdown IS NOT NULL as has_md, thoughtform IS NOT NULL as has_tf, embedding IS NOT NULL as has_vec, assertion_status
          FROM concepts WHERE id IN (${placeholders})`
       )
       .all(...ids) as ConceptMetaRow[];

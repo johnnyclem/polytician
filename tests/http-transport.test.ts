@@ -106,8 +106,8 @@ describe('Streamable HTTP transport', () => {
     const found = (await client.callTool({
       name: 'search_concepts',
       arguments: { query: 'shared memory' },
-    })) as { content: Array<{ text: string }> };
-    expect((JSON.parse(found.content[0]!.text) as Array<{ id: string }>)[0]!.id).toBe(id);
+    })) as { structuredContent: { results: Array<{ id: string }> } };
+    expect(found.structuredContent.results[0]!.id).toBe(id);
     await client.close();
   });
 

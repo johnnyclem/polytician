@@ -8,7 +8,7 @@ import { getConfig } from '../config.js';
 import { conceptEventBus } from '../events/concept-events.js';
 import { logger } from '../logger.js';
 import { ConfigurationError, ValidationError } from '../errors/index.js';
-import { VECTOR_DIMENSION, type DerivedMap } from '../types/concept.js';
+import { AssertionStatusSchema, VECTOR_DIMENSION, type ProvenanceMap } from '../types/concept.js';
 import { thoughtFormText, type StoredThoughtForm } from '../types/thoughtform.js';
 import { decodeBackup, encodeBackup, type BackupRecord } from '../backup/format.js';
 import { loadBackupKey, requireBackupKey, type BackupKey } from '../backup/key.js';
@@ -80,7 +80,9 @@ function rowToRecord(row: ConceptRow): BackupRecord {
     markdown: row.markdown,
     thoughtform: row.thoughtform ? (JSON.parse(row.thoughtform) as StoredThoughtForm) : null,
     embedding: deserializeEmbedding(row.embedding),
-    derived: parseJson<DerivedMap>(row.derived, {}),
+    provenance: parseJson<ProvenanceMap>(row.provenance, {}),
+    assertionStatus: AssertionStatusSchema.safeParse(row.assertion_status).data ?? null,
+    ledgerRef: row.ledger_ref ?? null,
   };
 }
 
@@ -218,7 +220,7 @@ async function reembedRecords(
   for (const record of records) {
     const hadVector = record.embedding !== null;
     record.embedding = null;
-    delete record.derived.vector;
+    delete record.provenance.vector;
     const tfText = record.thoughtform ? thoughtFormText(record.thoughtform) : null;
     if (record.markdown?.trim()) pending.push({ record, text: record.markdown, from: 'markdown' });
     else if (tfText) pending.push({ record, text: tfText, from: 'thoughtform' });
@@ -229,7 +231,11 @@ async function reembedRecords(
     const vector = vectors[i];
     if (!vector) return;
     p.record.embedding = vector;
-    p.record.derived.vector = { from: p.from };
+    p.record.provenance.vector = {
+      origin: 'derived',
+      derivedFrom: p.from,
+      model: embeddingService.getModel(),
+    };
   });
   return { reembedded: pending.length, vectorsDropped };
 }

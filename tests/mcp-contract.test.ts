@@ -121,10 +121,10 @@ describe('MCP tool contract', () => {
         markdown: '# Orchestration Result: session-1\n\n## Task\nrefactor the parser',
         tags: ['orchestration', 'session:session-1'],
       });
-      const hits = await ok<Array<{ id: string; score: number }>>('search_concepts', {
-        query: 'refactor the parser',
-        k: 5,
-      });
+      const { results: hits } = await ok<{ results: Array<{ id: string; score: number }> }>(
+        'search_concepts',
+        { query: 'refactor the parser', k: 5 }
+      );
       expect(hits[0]!.id).toBe(saved.id);
       expect(hits[0]!.score).toBeGreaterThan(0.3);
       // read_concept { id } is already valid; the concept text is `markdown`.
@@ -209,14 +209,18 @@ describe('MCP tool contract', () => {
     beforeEach(connect);
 
     it('makes a markdown-only concept searchable immediately', async () => {
-      const saved = await ok<{ id: string; derived: Record<string, unknown> }>('save_concept', {
+      const saved = await ok<{ id: string; provenance: Record<string, unknown> }>('save_concept', {
         markdown: 'Marie Curie studied radioactivity',
       });
-      expect(saved.derived).toEqual({ vector: { from: 'markdown' } });
-
-      const results = await ok<Array<{ id: string; score: number }>>('search_concepts', {
-        query: 'radioactivity Curie',
+      expect(saved.provenance).toEqual({
+        markdown: { origin: 'user' },
+        vector: { origin: 'derived', derivedFrom: 'markdown', model: 'Xenova/all-MiniLM-L6-v2' },
       });
+
+      const { results } = await ok<{ results: Array<{ id: string; score: number }> }>(
+        'search_concepts',
+        { query: 'radioactivity Curie' }
+      );
       expect(results[0]?.id).toBe(saved.id);
       expect(results[0]!.score).toBeGreaterThan(0.5);
       expect(results[0]!.score).toBeLessThanOrEqual(1);
@@ -224,19 +228,24 @@ describe('MCP tool contract', () => {
 
     it('embeds a thoughtform-only concept from its rawText', async () => {
       const saved = await ok<{ id: string }>('save_concept', { thoughtform: V1_THOUGHTFORM });
-      const results = await ok<Array<{ id: string }>>('search_concepts', { query: 'Lovelace program' });
+      const { results } = await ok<{ results: Array<{ id: string }> }>('search_concepts', {
+        query: 'Lovelace program',
+      });
       expect(results.map(r => r.id)).toContain(saved.id);
     });
 
     it('can be switched off with autoEmbed:false', async () => {
       await ok('save_concept', { markdown: 'Marie Curie studied radioactivity', autoEmbed: false });
-      expect(await ok('search_concepts', { query: 'radioactivity' })).toEqual([]);
+      expect(await ok('search_concepts', { query: 'radioactivity' })).toEqual({ results: [] });
     });
 
     it('re-embeds when authored markdown changes, but never replaces an authored vector', async () => {
       const saved = await ok<{ id: string }>('save_concept', { markdown: 'alpha beta' });
       await ok('save_concept', { id: saved.id, markdown: 'gamma delta' });
-      const hits = await ok<Array<{ id: string }>>('search_concepts', { query: 'gamma delta', k: 1 });
+      const { results: hits } = await ok<{ results: Array<{ id: string }> }>('search_concepts', {
+        query: 'gamma delta',
+        k: 1,
+      });
       expect(hits[0]?.id).toBe(saved.id);
 
       const authored = new Array<number>(VECTOR_DIMENSION).fill(0);
@@ -245,12 +254,12 @@ describe('MCP tool contract', () => {
         markdown: 'epsilon',
         embedding: authored,
       });
-      const updated = await ok<{ embedding: number[]; derived: Record<string, unknown> }>(
+      const updated = await ok<{ embedding: number[]; provenance: Record<string, unknown> }>(
         'save_concept',
         { id: withVector.id, markdown: 'zeta' }
       );
       expect(updated.embedding[0]).toBeCloseTo(1, 6);
-      expect(updated.derived).toEqual({});
+      expect(updated.provenance).toEqual({ markdown: { origin: 'user' }, vector: { origin: 'user' } });
     });
 
     it('auto-embeds batch saves by default', async () => {
@@ -278,12 +287,14 @@ describe('MCP tool contract', () => {
       expect(body.code).toBe('OVERWRITE_REFUSED');
       expect((await conceptService.read(saved.id)).markdown).toBe('my own words');
 
-      const forced = await ok<{ concept: { markdown: string; derived: Record<string, unknown> } }>(
+      const forced = await ok<{ concept: { markdown: string; provenance: Record<string, unknown> } }>(
         'convert_concept',
         { id: saved.id, from: 'thoughtform', to: 'markdown', overwrite: true }
       );
       expect(forced.concept.markdown).toContain('Ada Lovelace');
-      expect(forced.concept.derived).toMatchObject({ markdown: { from: 'thoughtform' } });
+      expect(forced.concept.provenance).toMatchObject({
+        markdown: { origin: 'derived', derivedFrom: 'thoughtform' },
+      });
     });
 
     it('refuses vector → markdown without an LLM instead of splicing in neighbours', async () => {
@@ -372,10 +383,10 @@ describe('MCP tool contract', () => {
         autoEmbed: true,
       });
 
-      const results = await ok<Array<{ id: string; namespace: string }>>('search_concepts', {
-        query: 'shared words',
-        crossNamespace: true,
-      });
+      const { results } = await ok<{ results: Array<{ id: string; namespace: string }> }>(
+        'search_concepts',
+        { query: 'shared words', crossNamespace: true }
+      );
       const ids = results.map(r => r.id);
       expect(ids).toEqual(expect.arrayContaining([a.id, b.id]));
       expect(ids).not.toContain(c.id);

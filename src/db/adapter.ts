@@ -22,8 +22,12 @@ export interface ConceptRow {
    * are labelled with the model configured on the first 3.0 start.
    */
   embedding_model?: string | null;
-  /** JSON-encoded DerivedMap; rows written before 3.0 read back as '{}'. */
-  derived?: string;
+  /** JSON-encoded ProvenanceMap; rows written before 3.0 read back as '{}'. */
+  provenance?: string;
+  /** asserted | verified | contested | retracted, or null for an ordinary memory. */
+  assertion_status?: string | null;
+  /** The ledger entry the concept mirrors, or null. */
+  ledger_ref?: string | null;
 }
 
 /** Columns ConceptService may change on update. */
@@ -37,7 +41,9 @@ export type ConceptUpdateFields = Partial<
     | 'thoughtform'
     | 'embedding'
     | 'embedding_model'
-    | 'derived'
+    | 'provenance'
+    | 'assertion_status'
+    | 'ledger_ref'
   >
 >;
 
@@ -75,6 +81,8 @@ export interface VectorFilter {
   namespaces: readonly string[] | null;
   /** Every tag must be present on the concept (exact match). */
   tags?: readonly string[];
+  /** The concept's assertion status must be one of these. */
+  assertionStatus?: readonly string[];
 }
 
 export interface ListRow {
@@ -87,6 +95,7 @@ export interface ListRow {
   has_md: number;
   has_tf: number;
   has_vec: number;
+  assertion_status: string | null;
 }
 
 export interface VectorResult {
@@ -102,6 +111,7 @@ export interface ConceptMetaRow {
   has_md: number;
   has_tf: number;
   has_vec: number;
+  assertion_status: string | null;
 }
 
 export interface StatsResult {
@@ -144,6 +154,8 @@ export interface DatabaseAdapter {
     offset: number;
     tags?: string[];
     namespace?: string;
+    /** Only concepts whose assertion status is one of these. */
+    assertionStatus?: readonly string[];
   }): { rows: ListRow[]; total: number } | Promise<{ rows: ListRow[]; total: number }>;
 
   // --- Vector operations ---

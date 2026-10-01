@@ -1,14 +1,18 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { conceptService } from './services/concept.service.js';
 import { conversionService } from './services/conversion.service.js';
 import { embeddingService } from './services/embedding.service.js';
 import { crossNamespaceScope, resolveNamespace } from './services/namespace-policy.js';
 import {
+  AssertionStatusSchema,
   EmbeddingSchema,
+  LedgerRefSchema,
   MarkdownSchema,
   NamespaceSchema,
   RepresentationTypeSchema,
+  SourceSchema,
   TagsSchema,
   ThoughtFormInputSchema,
   VECTOR_DIMENSION,
@@ -16,12 +20,33 @@ import {
 import { LIMITS } from './types/limits.js';
 import { ValidationError } from './errors/index.js';
 import { getConfig } from './config.js';
-import { jsonResult, runTool } from './mcp/tool-result.js';
+import { jsonResult, runTool, useCodedToolErrors } from './mcp/tool-result.js';
+import {
+  BatchSaveOut,
+  ConceptOut,
+  ConvertConceptOut,
+  DeleteConceptOut,
+  EmbedTextOut,
+  GetStatsOut,
+  HealthCheckOut,
+  ListConceptsOut,
+  ReembedOut,
+  SearchConceptsOut,
+} from './mcp/output-schemas.js';
 import { registerBackupTools } from './mcp/tools/backup.js';
 
 const namespaceArg = NamespaceSchema.optional().describe(
   'Namespace (default: "default"). Must be in POLYTICIAN_NAMESPACES when the operator set one.'
 );
+
+const assertionStatusFilter = z
+  .array(AssertionStatusSchema)
+  .min(1)
+  .max(4)
+  .optional()
+  .describe(
+    'Only concepts whose assertionStatus is one of these (concepts without one are left out)'
+  );
 
 const conceptFields = {
   id: z.string().uuid().optional().describe('Concept UUID. Auto-generated if omitted.'),
@@ -43,6 +68,17 @@ const conceptFields = {
   tags: TagsSchema.optional().describe(
     `Tags, merged on update (at most ${LIMITS.tags}, each ${LIMITS.tagChars} characters or fewer)`
   ),
+  source: SourceSchema.optional().describe(
+    'Provenance recorded on the representations this call writes (default origin "user")'
+  ),
+  assertionStatus: AssertionStatusSchema.nullable()
+    .optional()
+    .describe(
+      'Truth status of a concept that records a claim (e.g. a stenographer TB/UV entry); null clears it, omitted keeps it. Stored as given, not checked.'
+    ),
+  ledgerRef: LedgerRefSchema.nullable()
+    .optional()
+    .describe('The ledger entry this concept mirrors (id, path#id or hash); null clears it'),
 };
 
 const autoEmbedArg = z
@@ -52,10 +88,32 @@ const autoEmbedArg = z
     'Derive the vector from the markdown (else the thoughtform text) when no embedding is given, so the concept is searchable (default true). Never replaces a caller-supplied vector.'
   );
 
+/** Hints for a tool that only reads local state. */
+const READ_ONLY: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
 export async function createServer(): Promise<McpServer> {
   const server = new McpServer({
     name: 'polytician',
     version: '2.0.0',
+  });
+  useCodedToolErrors(server);
+
+  const cfg = getConfig();
+  const av = cfg.agentVault;
+  // Writes reach AgentVault when the operator enabled sync push or archival.
+  const writesLeaveBox = Boolean(
+    av && ((av.sync.enabled && av.sync.direction !== 'pull') || av.archival.enabled)
+  );
+  const write = (destructive: boolean, idempotent: boolean): ToolAnnotations => ({
+    readOnlyHint: false,
+    destructiveHint: destructive,
+    idempotentHint: idempotent,
+    openWorldHint: writesLeaveBox,
   });
 
   // --- CRUD Tools ---
@@ -64,10 +122,12 @@ export async function createServer(): Promise<McpServer> {
     'save_concept',
     {
       description:
-        'Create or update a concept with one or more representations (vector, markdown, thoughtform). A new concept needs at least one. Tags are merged on update. The vector is derived from the text unless autoEmbed is false. An update must name the namespace the concept lives in; expectedVersion guards against concurrent writers.',
+        'Create or update a concept with one or more representations (vector, markdown, thoughtform). A new concept needs at least one. Tags are merged on update. The vector is derived from the text unless autoEmbed is false. An update must name the namespace the concept lives in; expectedVersion guards against concurrent writers. Each representation written records its provenance (source), and a concept can carry an assertionStatus and ledgerRef.',
       inputSchema: z
         .object({ ...conceptFields, namespace: namespaceArg, autoEmbed: autoEmbedArg })
         .strict(),
+      outputSchema: ConceptOut,
+      annotations: write(true, false),
     },
     async ({ namespace, autoEmbed, ...fields }) =>
       runTool('save_concept', async () => {
@@ -84,7 +144,7 @@ export async function createServer(): Promise<McpServer> {
     'read_concept',
     {
       description:
-        'Read all available representations for a concept in a namespace. Optionally filter to specific representations.',
+        'Read all available representations for a concept in a namespace, with their provenance, assertionStatus and ledgerRef. Optionally filter to specific representations.',
       inputSchema: z
         .object({
           id: z.string().uuid().describe('Concept UUID'),
@@ -95,6 +155,8 @@ export async function createServer(): Promise<McpServer> {
             .describe('Filter to specific representations'),
         })
         .strict(),
+      outputSchema: ConceptOut,
+      annotations: READ_ONLY,
     },
     async ({ id, namespace, representations }) =>
       runTool('read_concept', async () => {
@@ -115,6 +177,8 @@ export async function createServer(): Promise<McpServer> {
           namespace: namespaceArg,
         })
         .strict(),
+      outputSchema: DeleteConceptOut,
+      annotations: write(true, true),
     },
     async ({ id, namespace }) =>
       runTool('delete_concept', async () => {
@@ -127,7 +191,7 @@ export async function createServer(): Promise<McpServer> {
     'list_concepts',
     {
       description:
-        'List concepts with pagination and optional tag filtering (exact tag match). Results are scoped to the namespace.',
+        'List concepts with pagination and optional tag (exact match) and assertionStatus filtering. Results are scoped to the namespace.',
       inputSchema: z
         .object({
           namespace: namespaceArg,
@@ -140,16 +204,20 @@ export async function createServer(): Promise<McpServer> {
             .describe('Max results (default 50)'),
           offset: z.number().int().min(0).optional().describe('Pagination offset'),
           tags: TagsSchema.optional().describe('Only concepts carrying every one of these tags'),
+          assertionStatus: assertionStatusFilter,
         })
         .strict(),
+      outputSchema: ListConceptsOut,
+      annotations: READ_ONLY,
     },
-    async ({ namespace, limit, offset, tags }) =>
+    async ({ namespace, limit, offset, tags, assertionStatus }) =>
       runTool('list_concepts', async () => {
         const result = await conceptService.list({
           namespace: resolveNamespace(namespace),
           limit,
           offset,
           tags,
+          assertionStatus,
         });
         return jsonResult(result);
       })
@@ -177,6 +245,8 @@ export async function createServer(): Promise<McpServer> {
             .describe('Embedding batch size (default 50)'),
         })
         .strict(),
+      outputSchema: BatchSaveOut,
+      annotations: write(true, false),
     },
     async ({ concepts: entries, namespace, autoEmbed, batchSize }) =>
       runTool('batch_save_concepts', async () => {
@@ -198,7 +268,7 @@ export async function createServer(): Promise<McpServer> {
     'search_concepts',
     {
       description:
-        'Semantic similarity search over one namespace. Provide a text query (auto-embedded) or a raw vector. Namespace and tag filters are applied inside the vector search. Results carry score = (1 + cosine similarity) / 2 in [0, 1], best first, ties by id. crossNamespace searches the namespaces the operator allowed via POLYTICIAN_NAMESPACES and is refused if none are configured.',
+        'Semantic similarity search over one namespace. Provide a text query (auto-embedded) or a raw vector. Namespace, tag and assertionStatus filters are applied inside the vector search. Returns { results }, each with score = (1 + cosine similarity) / 2 in [0, 1], best first, ties by id. crossNamespace (without namespace) searches the namespaces the operator allowed via POLYTICIAN_NAMESPACES and is refused if none are configured.',
       inputSchema: z
         .object({
           query: z
@@ -218,18 +288,26 @@ export async function createServer(): Promise<McpServer> {
             .optional()
             .describe('Number of results (default 10)'),
           tags: TagsSchema.optional().describe('Only concepts carrying every one of these tags'),
+          assertionStatus: assertionStatusFilter,
           namespace: namespaceArg,
           crossNamespace: z
             .boolean()
             .optional()
             .describe(
-              'Search every namespace the operator allowed (POLYTICIAN_NAMESPACES) instead of one'
+              'Search every namespace the operator allowed (POLYTICIAN_NAMESPACES) instead of one; cannot be combined with namespace'
             ),
         })
         .strict(),
+      outputSchema: SearchConceptsOut,
+      annotations: READ_ONLY,
     },
-    async ({ query, vector, k, tags, namespace, crossNamespace }) =>
+    async ({ query, vector, k, tags, assertionStatus, namespace, crossNamespace }) =>
       runTool('search_concepts', async () => {
+        if (crossNamespace && namespace !== undefined) {
+          throw new ValidationError(
+            'Pass either namespace or crossNamespace: true; a cross-namespace search spans the allowlist, not one namespace'
+          );
+        }
         const scope = crossNamespace
           ? { namespaces: crossNamespaceScope() }
           : { namespace: resolveNamespace(namespace) };
@@ -241,8 +319,11 @@ export async function createServer(): Promise<McpServer> {
         } else {
           throw new ValidationError('Provide exactly one of query (text) or vector');
         }
-        const results = await conceptService.search(queryEmbedding, k ?? 10, tags, scope);
-        return jsonResult(results);
+        const results = await conceptService.search(queryEmbedding, k ?? 10, tags, {
+          ...scope,
+          assertionStatus,
+        });
+        return jsonResult({ results });
       })
   );
 
@@ -252,7 +333,7 @@ export async function createServer(): Promise<McpServer> {
     'convert_concept',
     {
       description:
-        'Derive one representation of a concept from another and store it, marked as derived. Refuses to replace an authored (caller-written) representation unless overwrite is true. Non-LLM paths: markdown→vector, thoughtform→vector, thoughtform→markdown. LLM paths: markdown→thoughtform (or the rule-based NLP pipeline), vector→markdown and vector→thoughtform (from nearest neighbours in the same namespace).',
+        'Derive one representation of a concept from another and store it, with provenance origin "derived" (or "llm" when an LLM wrote it). Refuses to replace an authored (caller-written or imported) representation unless overwrite is true. Non-LLM paths: markdown→vector, thoughtform→vector, thoughtform→markdown. LLM paths: markdown→thoughtform (or the rule-based NLP pipeline), vector→markdown and vector→thoughtform (from nearest neighbours in the same namespace).',
       inputSchema: z
         .object({
           id: z.string().uuid().describe('Concept UUID'),
@@ -265,6 +346,12 @@ export async function createServer(): Promise<McpServer> {
             .describe('Replace an authored target representation (default false)'),
         })
         .strict(),
+      outputSchema: ConvertConceptOut,
+      annotations: {
+        ...write(true, false),
+        // LLM conversions send the concept's text to AgentVault inference.
+        openWorldHint: writesLeaveBox || cfg.llm.provider === 'agentvault',
+      },
     },
     async ({ id, namespace, from, to, overwrite }) =>
       runTool('convert_concept', async () => {
@@ -287,6 +374,8 @@ export async function createServer(): Promise<McpServer> {
           text: z.string().min(1).max(LIMITS.queryChars).describe('Text to embed'),
         })
         .strict(),
+      outputSchema: EmbedTextOut,
+      annotations: READ_ONLY,
     },
     async ({ text }) =>
       runTool('embed_text', async () => {
@@ -316,6 +405,8 @@ export async function createServer(): Promise<McpServer> {
             .describe(`Most concepts to re-embed in this call (default ${LIMITS.batchEntries})`),
         })
         .strict(),
+      outputSchema: ReembedOut,
+      annotations: write(true, true),
     },
     async ({ namespace, overwrite, limit }) =>
       runTool('reembed_concepts', async () => {
@@ -336,6 +427,8 @@ export async function createServer(): Promise<McpServer> {
       description:
         'Server status, embedding model status, DB stats for a namespace, LLM provider status.',
       inputSchema: z.object({ namespace: namespaceArg }).strict(),
+      outputSchema: HealthCheckOut,
+      annotations: READ_ONLY,
     },
     async ({ namespace }) =>
       runTool('health_check', async () => {
@@ -360,6 +453,8 @@ export async function createServer(): Promise<McpServer> {
     {
       description: 'Concept count, vector count, representation breakdown for a namespace.',
       inputSchema: z.object({ namespace: namespaceArg }).strict(),
+      outputSchema: GetStatsOut,
+      annotations: READ_ONLY,
     },
     async ({ namespace }) =>
       runTool('get_stats', async () => {
@@ -373,10 +468,9 @@ export async function createServer(): Promise<McpServer> {
   registerBackupTools(server);
 
   // Register AgentVault tools if integration is configured
-  const cfg = getConfig();
-  if (cfg.agentVault) {
+  if (av) {
     const { registerVaultTools } = await import('./integrations/agent-vault/tools/vault-tools.js');
-    registerVaultTools(server, cfg.agentVault);
+    registerVaultTools(server, av);
   }
 
   return server;

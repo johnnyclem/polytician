@@ -2,12 +2,18 @@ import { v4 as uuidv4 } from 'uuid';
 import { getAdapter } from '../db/client.js';
 import type { ConceptRow, ConceptUpdateFields, ConceptWrite } from '../db/adapter.js';
 import {
+  AssertionStatusSchema,
   embeddingProblem,
+  isMachineMade,
+  SourceSchema,
+  type AssertionStatus,
   type Concept,
   type ConceptRepresentations,
-  type DerivedMap,
+  type Provenance,
+  type ProvenanceMap,
   type RepresentationType,
   type SearchResult,
+  type Source,
 } from '../types/concept.js';
 import {
   StoredThoughtFormSchema,
@@ -54,10 +60,22 @@ export interface SaveParams {
    * (else the thoughtform text). Never replaces an authored vector.
    */
   autoEmbed?: boolean;
-  /** Representations in this write that were derived, with provenance. Others are authored. */
-  derived?: DerivedMap;
-  /** Allow derived representations in this write to replace authored ones. */
+  /**
+   * What the caller declares about the representations it supplies (default
+   * origin 'user'). `createdBy` is also recorded on an auto-embedded vector.
+   */
+  source?: Source;
+  /**
+   * Exact provenance of supplied representations, for content Polytician made
+   * (conversions, re-embedding); takes precedence over `source`.
+   */
+  provenance?: ProvenanceMap;
+  /** Allow derived or LLM representations in this write to replace authored ones. */
   overwrite?: boolean;
+  /** Set (or with null clear) the concept's assertion status; omitted keeps it. */
+  assertionStatus?: AssertionStatus | null;
+  /** Set (or with null clear) the ledger entry the concept mirrors; omitted keeps it. */
+  ledgerRef?: string | null;
 }
 
 /** A concept as a backup holds it: every stored field, representations as values. */
@@ -71,7 +89,9 @@ export interface RestoreRecord {
   markdown: string | null;
   thoughtform: StoredThoughtForm | null;
   embedding: number[] | null;
-  derived: DerivedMap;
+  provenance: ProvenanceMap;
+  assertionStatus: AssertionStatus | null;
+  ledgerRef: string | null;
 }
 
 /**
@@ -94,6 +114,8 @@ export interface SearchOptions {
   namespace?: string;
   /** Several namespaces, or '*' for all. */
   namespaces?: readonly string[] | '*';
+  /** Only concepts whose assertion status is one of these (applied inside the vector query). */
+  assertionStatus?: readonly AssertionStatus[];
 }
 
 export type ReembedSkipReason = 'authored' | 'no-text' | 'changed';
@@ -118,16 +140,29 @@ interface PlannedWrite {
   embedding: number[] | null | undefined;
 }
 
-function parseDerived(raw: string | undefined | null): DerivedMap {
+function parseProvenance(raw: string | undefined | null): ProvenanceMap {
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as DerivedMap)
+      ? (parsed as ProvenanceMap)
       : {};
   } catch {
     return {};
   }
+}
+
+/** A stored status, or null if the column holds none (or a value this version does not know). */
+function parseAssertionStatus(raw: string | null | undefined): AssertionStatus | null {
+  const parsed = AssertionStatusSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Provenance with its unset optional fields left out, so stored JSON stays minimal. */
+function provenanceOf(fields: Provenance): Provenance {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, v]) => v !== undefined)
+  ) as Provenance;
 }
 
 function rowToConcept(row: ConceptRow): Concept {
@@ -143,7 +178,9 @@ function rowToConcept(row: ConceptRow): Concept {
     // which conversions re-validate before use.
     thoughtform: row.thoughtform ? (JSON.parse(row.thoughtform) as StoredThoughtForm) : null,
     embedding: deserializeEmbedding(row.embedding),
-    derived: parseDerived(row.derived),
+    provenance: parseProvenance(row.provenance),
+    assertionStatus: parseAssertionStatus(row.assertion_status),
+    ledgerRef: row.ledger_ref ?? null,
   };
 }
 
@@ -200,6 +237,27 @@ function validateEntry(entry: SaveParams, label: string): void {
         fail(`each tag must be a string of 1-${LIMITS.tagChars} characters`);
       }
     }
+  }
+  if (entry.source !== undefined && !SourceSchema.safeParse(entry.source).success) {
+    fail(
+      `source must be { origin?: "user" | "import", createdBy?, model? } with strings of 1-${LIMITS.provenanceChars} characters`
+    );
+  }
+  if (
+    entry.assertionStatus !== undefined &&
+    entry.assertionStatus !== null &&
+    !AssertionStatusSchema.safeParse(entry.assertionStatus).success
+  ) {
+    fail('assertionStatus must be one of asserted, verified, contested, retracted (or null)');
+  }
+  if (
+    entry.ledgerRef !== undefined &&
+    entry.ledgerRef !== null &&
+    (typeof entry.ledgerRef !== 'string' ||
+      entry.ledgerRef.length === 0 ||
+      entry.ledgerRef.length > LIMITS.ledgerRefChars)
+  ) {
+    fail(`ledgerRef must be a string of 1-${LIMITS.ledgerRefChars} characters (or null)`);
   }
 }
 
@@ -340,6 +398,8 @@ export class ConceptService {
           thoughtform: r.thoughtform ?? undefined,
           embedding: r.embedding ?? undefined,
           tags: r.tags,
+          assertionStatus: r.assertionStatus,
+          ledgerRef: r.ledgerRef,
         },
         label
       );
@@ -366,7 +426,9 @@ export class ConceptService {
           embedding: r.embedding !== null ? serializeEmbedding(r.embedding) : null,
           // import_backup only keeps vectors made by the configured model.
           embedding_model: r.embedding !== null ? embeddingService.getModel() : null,
-          derived: JSON.stringify(r.derived),
+          provenance: JSON.stringify(r.provenance),
+          assertion_status: r.assertionStatus,
+          ledger_ref: r.ledgerRef,
         };
         if (!existing) {
           writes.push({
@@ -495,9 +557,15 @@ export class ConceptService {
       throw new VersionConflictError(id, entry.expectedVersion, 0);
     }
 
-    const derived: DerivedMap = existing ? parseDerived(existing.derived) : {};
+    const provenance: ProvenanceMap = existing ? parseProvenance(existing.provenance) : {};
+    const declared = provenanceOf({
+      origin: entry.source?.origin ?? 'user',
+      model: entry.source?.model,
+      createdBy: entry.source?.createdBy,
+    });
 
-    // Explicitly supplied representations: derived ones may not replace authored content.
+    // Explicitly supplied representations: derived or LLM content may not
+    // replace authored content (user, import, or written before 3.0).
     const supplied: Array<[RepresentationType, boolean]> = [
       ['markdown', entry.markdown !== undefined],
       ['thoughtform', entry.thoughtform !== undefined],
@@ -505,15 +573,17 @@ export class ConceptService {
     ];
     for (const [rep, present] of supplied) {
       if (!present) continue;
-      const provenance = entry.derived?.[rep];
-      if (!provenance) {
-        delete derived[rep];
-        continue;
-      }
-      if (existing && hasRepresentation(existing, rep) && !derived[rep] && !entry.overwrite) {
+      const next = entry.provenance?.[rep] ?? declared;
+      if (
+        isMachineMade(next) &&
+        existing &&
+        hasRepresentation(existing, rep) &&
+        !isMachineMade(provenance[rep]) &&
+        !entry.overwrite
+      ) {
         throw new OverwriteRefusedError(id, rep);
       }
-      derived[rep] = provenance;
+      provenance[rep] = next;
     }
 
     let embedding: number[] | undefined = entry.embedding;
@@ -522,10 +592,16 @@ export class ConceptService {
       // never over an authored vector. A thoughtform-only write leaves a
       // vector that was derived from existing markdown alone.
       const sourceChanged = auto.from === 'markdown' || !existing || existing.markdown === null;
-      const vectorAuthored = existing !== null && existing.embedding !== null && !derived.vector;
+      const vectorAuthored =
+        existing !== null && existing.embedding !== null && !isMachineMade(provenance.vector);
       if (sourceChanged && !vectorAuthored) {
         embedding = auto.vector;
-        derived.vector = { from: auto.from };
+        provenance.vector = provenanceOf({
+          origin: 'derived',
+          derivedFrom: auto.from,
+          model: embeddingService.getModel(),
+          createdBy: entry.source?.createdBy,
+        });
       }
     }
 
@@ -553,7 +629,9 @@ export class ConceptService {
         thoughtform: thoughtform ?? null,
         embedding: embeddingBuf ?? null,
         embedding_model: embeddingBuf ? embeddingModel : null,
-        derived: JSON.stringify(derived),
+        provenance: JSON.stringify(provenance),
+        assertion_status: entry.assertionStatus ?? null,
+        ledger_ref: entry.ledgerRef ?? null,
       };
       return { write: { kind: 'insert', row }, row, created: true, embedding };
     }
@@ -562,7 +640,7 @@ export class ConceptService {
     const tags = JSON.stringify(
       mergeTags(JSON.parse(existing.tags) as string[], entry.tags, label)
     );
-    const derivedJson = JSON.stringify(derived);
+    const provenanceJson = JSON.stringify(provenance);
     const fields: ConceptUpdateFields = {
       version,
       updated_at: now,
@@ -571,7 +649,9 @@ export class ConceptService {
       thoughtform,
       embedding: embeddingBuf,
       embedding_model: embeddingBuf ? embeddingModel : undefined,
-      derived: derivedJson,
+      provenance: provenanceJson,
+      assertion_status: entry.assertionStatus,
+      ledger_ref: entry.ledgerRef,
     };
     const row: ConceptRow = {
       ...existing,
@@ -582,7 +662,10 @@ export class ConceptService {
       thoughtform: thoughtform ?? existing.thoughtform,
       embedding: embeddingBuf ?? existing.embedding,
       embedding_model: embeddingBuf ? embeddingModel : existing.embedding_model,
-      derived: derivedJson,
+      provenance: provenanceJson,
+      assertion_status:
+        entry.assertionStatus !== undefined ? entry.assertionStatus : existing.assertion_status,
+      ledger_ref: entry.ledgerRef !== undefined ? entry.ledgerRef : existing.ledger_ref,
     };
     return {
       write: {
@@ -624,7 +707,9 @@ export class ConceptService {
       createdAt: full.createdAt,
       updatedAt: full.updatedAt,
       tags: full.tags,
-      derived: full.derived,
+      provenance: full.provenance,
+      assertionStatus: full.assertionStatus,
+      ledgerRef: full.ledgerRef,
     };
     if (wants('markdown') && full.markdown !== null) result.markdown = full.markdown;
     if (wants('thoughtform') && full.thoughtform !== null) result.thoughtform = full.thoughtform;
@@ -647,6 +732,8 @@ export class ConceptService {
     limit?: number;
     offset?: number;
     tags?: string[];
+    /** Only concepts whose assertion status is one of these. */
+    assertionStatus?: readonly AssertionStatus[];
   }): Promise<{
     concepts: Array<{
       id: string;
@@ -656,6 +743,7 @@ export class ConceptService {
       updatedAt: number;
       tags: string[];
       representations: ConceptRepresentations;
+      assertionStatus: AssertionStatus | null;
     }>;
     total: number;
   }> {
@@ -668,6 +756,7 @@ export class ConceptService {
       offset,
       tags: params?.tags,
       namespace: params?.namespace ?? 'default',
+      assertionStatus: params?.assertionStatus,
     });
 
     return {
@@ -683,6 +772,7 @@ export class ConceptService {
           markdown: r.has_md === 1,
           thoughtform: r.has_tf === 1,
         },
+        assertionStatus: parseAssertionStatus(r.assertion_status),
       })),
       total,
     };
@@ -710,7 +800,11 @@ export class ConceptService {
       options?.namespaces === '*'
         ? null
         : (options?.namespaces ?? [options?.namespace ?? 'default']);
-    const filter = { namespaces, tags: tags && tags.length > 0 ? tags : undefined };
+    const filter = {
+      namespaces,
+      tags: tags && tags.length > 0 ? tags : undefined,
+      assertionStatus: options?.assertionStatus,
+    };
 
     const model = embeddingService.getModel();
     const foreign = await adapter.countForeignVectors(model, namespaces);
@@ -761,6 +855,7 @@ export class ConceptService {
           markdown: cr.has_md === 1,
           thoughtform: cr.has_tf === 1,
         },
+        assertionStatus: parseAssertionStatus(cr.assertion_status),
       });
     }
     return results;
@@ -804,7 +899,7 @@ export class ConceptService {
           skipped.push({ id, reason: 'no-text' });
           continue;
         }
-        if (!parseDerived(row.derived).vector && !options.overwrite) {
+        if (!isMachineMade(parseProvenance(row.provenance).vector) && !options.overwrite) {
           skipped.push({ id, reason: 'authored' });
           continue;
         }
@@ -820,7 +915,7 @@ export class ConceptService {
             namespace,
             expectedVersion: row.version,
             embedding: vectors[i],
-            derived: { vector: { from } },
+            provenance: { vector: { origin: 'derived', derivedFrom: from, model } },
             overwrite: true,
           });
           reembedded.push(row.id);

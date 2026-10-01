@@ -33,7 +33,12 @@ function record(overrides: Partial<BackupRecord> = {}): BackupRecord {
     markdown: `# note\n${SECRET}`,
     thoughtform: null,
     embedding: vector(1),
-    derived: { vector: { from: 'markdown' } },
+    provenance: {
+      markdown: { origin: 'import', createdBy: 'stenographer' },
+      vector: { origin: 'derived', derivedFrom: 'markdown', model: 'Xenova/all-MiniLM-L6-v2' },
+    },
+    assertionStatus: 'verified',
+    ledgerRef: 'stenographer:wiki/truth.jsonl#tb-1',
     ...overrides,
   };
 }
@@ -54,7 +59,9 @@ describe('backup format v1 (JSONL)', () => {
         namespace: 'work',
         markdown: null,
         embedding: null,
-        derived: {},
+        provenance: { thoughtform: { origin: 'user' } },
+        assertionStatus: null,
+        ledgerRef: null,
         thoughtform: {
           id: '22222222-2222-4222-a222-222222222222',
           rawText: 'Ada wrote the first program.',

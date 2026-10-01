@@ -315,7 +315,11 @@ describe('exportBackup / importBackup', () => {
     expect(result.skipped).toEqual([{ id: ID_B, namespace: 'default', reason: 'vector-only' }]);
     const restored = await service.read(ID_A);
     expect(restored.embedding).not.toEqual(vector(2));
-    expect(restored.derived?.vector).toEqual({ from: 'markdown' });
+    expect(restored.provenance?.vector).toEqual({
+      origin: 'derived',
+      derivedFrom: 'markdown',
+      model: 'Xenova/some-other-model',
+    });
   });
 });
 

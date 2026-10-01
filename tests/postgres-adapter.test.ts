@@ -104,7 +104,8 @@ describe.skipIf(!PG_URL)('PostgresAdapter (pgvector)', () => {
     expect(results.map(r => r.id)).toEqual([id]);
     expect(results[0]!.score).toBeCloseTo(1, 5);
     const read = await service.read(id);
-    expect(read.derived).toEqual({});
+    expect(read.provenance).toEqual({});
+    expect(read).toMatchObject({ assertionStatus: null, ledgerRef: null });
     // 2.x recorded no model; its vectors are labelled with the configured one.
     const labelled = await admin.query<{ embedding_model: string }>(
       'SELECT embedding_model FROM concepts WHERE id = $1',
@@ -180,6 +181,34 @@ describe.skipIf(!PG_URL)('PostgresAdapter (pgvector)', () => {
     expect((await service.search(vec(0), 5, ['rare'], { namespaces: '*' })).map(r => r.id)).toEqual(
       [rare.id]
     );
+  });
+
+  it('stores provenance and assertion status, and filters search and list by status', async () => {
+    await open();
+    for (let i = 0; i < 60; i++) {
+      await service.save({ embedding: vec(0, i / 1000), assertionStatus: i % 2 ? 'contested' : null });
+    }
+    const verified = await service.save({
+      markdown: 'verified fact',
+      embedding: vec(0, 0.9),
+      source: { origin: 'import', createdBy: 'stenographer' },
+      assertionStatus: 'verified',
+      ledgerRef: 'stenographer:wiki#tb-1',
+    });
+    expect(await service.read(verified.id)).toMatchObject({
+      assertionStatus: 'verified',
+      ledgerRef: 'stenographer:wiki#tb-1',
+      provenance: {
+        markdown: { origin: 'import', createdBy: 'stenographer' },
+        vector: { origin: 'import', createdBy: 'stenographer' },
+      },
+    });
+    const hits = await service.search(vec(0), 1, undefined, { assertionStatus: ['verified'] });
+    expect(hits.map(h => [h.id, h.assertionStatus])).toEqual([[verified.id, 'verified']]);
+    expect((await service.list({ assertionStatus: ['contested'] })).total).toBe(30);
+
+    await service.save({ id: verified.id, namespace: 'default', assertionStatus: null });
+    expect((await service.read(verified.id)).assertionStatus).toBeNull();
   });
 
   it('returns up to k results beyond the default ef_search', async () => {

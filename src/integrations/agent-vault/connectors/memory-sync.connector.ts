@@ -98,6 +98,7 @@ export async function applyPulledEntries(
         namespace,
         markdown: entry.data,
         tags: entry.tags,
+        source: { origin: 'import' },
         // Guards against a local write between our read and this save.
         expectedVersion: existing?.version,
         autoEmbed: true,

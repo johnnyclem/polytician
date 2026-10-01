@@ -12,14 +12,23 @@ This guide covers every breaking change in 3.0 and what to do about it. The full
 
 | Backend | Migration |
 |---|---|
-| SQLite | Rebuilds `concept_vectors` from `concepts.embedding` with a `namespace` partition key and `distance_metric=cosine`, and adds the `concepts.derived` column. |
-| Postgres | Under an advisory lock: adds `concepts.derived`, drops `idx_concept_vectors_embedding` (IVFFlat, L2) and creates `idx_concept_vectors_embedding_cosine` (HNSW, `vector_cosine_ops`). Re-indexes rows whose vector was missing and records `schema_version = 3` in `metadata`. |
+| SQLite | Rebuilds `concept_vectors` from `concepts.embedding` with a `namespace` partition key and `distance_metric=cosine`, and adds the `concepts.provenance`, `assertion_status` and `ledger_ref` columns. |
+| Postgres | Under an advisory lock: adds `concepts.provenance`, `assertion_status` and `ledger_ref`, drops `idx_concept_vectors_embedding` (IVFFlat, L2) and creates `idx_concept_vectors_embedding_cosine` (HNSW, `vector_cosine_ops`). Re-indexes rows whose vector was missing and records `schema_version = 3` in `metadata`. |
 
 Both backends also add `concepts.embedding_model` and label every existing vector, once, with the configured `POLYTICIAN_EMBEDDING_MODEL` (2.x recorded no model). **If you changed `POLYTICIAN_EMBEDDING_MODEL` in 2.x,** start 3.0 the first time with the model your vectors were made with, then change it and run `reembed_concepts` per namespace.
 
 On both backends, stored embeddings that could never be searched are set to `NULL`: wrong byte length (left by a failed, non-atomic 2.x save), non-finite, or all zero. The concept keeps its markdown and thoughtform. Re-embed it with `convert_concept { from: "markdown", to: "vector" }`, or re-save it.
 
 ## Tool callers (MCP clients, agents, AgentVault)
+
+### Results are typed objects: `search_concepts` returns `{ results }`
+
+Every tool now declares an `outputSchema` and returns `structuredContent`; `content[0].text` holds the same JSON. Read `structuredContent` if your client supports it. The one shape change is `search_concepts`, which returns `{ "results": [...] }` instead of a bare array:
+
+```diff
+- const hits = JSON.parse(result.content[0].text);
++ const { results: hits } = JSON.parse(result.content[0].text); // or result.structuredContent
+```
 
 ### `search_concepts`: `distance` → `score`
 
@@ -52,7 +61,7 @@ A `save_concept` create must include at least one of `markdown`, `thoughtform` o
 
 - Pass `namespace` to `read_concept`, `delete_concept`, `convert_concept`, `vault_memory_push` and `vault_archive_concept` when the concept is not in `"default"`. Otherwise the call returns `NOT_FOUND`.
 - Pass the concept's `namespace` when updating it with `save_concept`. An update through a different namespace (including an omitted one, which means `"default"`) returns `NAMESPACE_DENIED`. Concepts cannot move between namespaces; to move one, create it in the new namespace and delete the old one.
-- `crossNamespace: true` now requires the operator to set `POLYTICIAN_NAMESPACES` (a comma-separated list, or `*` for all namespaces), and it searches only those namespaces.
+- `crossNamespace: true` now requires the operator to set `POLYTICIAN_NAMESPACES` (a comma-separated list, or `*` for all namespaces), and it searches only those namespaces. Drop `namespace` from a `crossNamespace` search: passing both is a `VALIDATION_ERROR`.
 - `get_stats` and `health_check` without `namespace` report `"default"` only, as their descriptions always said; call them per namespace for other counts.
 
 ### Concurrency
@@ -65,7 +74,7 @@ A `save_concept` create must include at least one of `markdown`, `thoughtform` o
 
 ### Conversions
 
-- `convert_concept` refuses (`OVERWRITE_REFUSED`) to replace a representation that a caller wrote. Pass `overwrite: true` to replace it. Representations produced by an earlier conversion or by auto-embedding can be re-derived without it. `read_concept` shows which representations are derived in `derived`.
+- `convert_concept` refuses (`OVERWRITE_REFUSED`) to replace a representation that a caller wrote or imported. Pass `overwrite: true` to replace it. Representations produced by an earlier conversion or by auto-embedding can be re-derived without it. `read_concept` shows where each representation came from in `provenance` (`origin`: `user`, `derived`, `llm` or `import`).
 - `vector → markdown` without `POLYTICIAN_LLM_PROVIDER` now fails with `CONVERSION_ERROR` instead of writing neighbouring concepts' text as the concept's markdown. Configure an LLM provider if you use this conversion.
 
 ### Batches
@@ -85,7 +94,7 @@ A `save_concept` create must include at least one of `markdown`, `thoughtform` o
 
 ### AgentVault's `polytician-enricher`
 
-Its calls never matched these tools: in 2.x they stored empty concepts and found nothing; in 3.0 they fail with `Input validation error: ... Unrecognized key(s)`. Change `save_concept { name, content, representation, metadata }` to `save_concept { markdown: content, tags: [...] }`, `search_concepts { query, limit, min_score }` to `search_concepts { query, k: limit }` and filter on `score` client-side, and parse results from `content[0].text` (there is no `content[0].data`). The README section "Calling Polytician from AgentVault's orchestrator" has the full contract.
+Its calls never matched these tools: in 2.x they stored empty concepts and found nothing; in 3.0 they fail with `VALIDATION_ERROR` (`Input validation error: ... Unrecognized key(s)`). Change `save_concept { name, content, representation, metadata }` to `save_concept { markdown: content, tags: [...] }`, `search_concepts { query, limit, min_score }` to `search_concepts { query, k: limit }` and filter `results` on `score` client-side, and read results from `structuredContent` or `content[0].text` (there is no `content[0].data`). The README section "Calling Polytician from AgentVault's orchestrator" has the full contract.
 
 ### Embedding model changes
 
@@ -93,7 +102,7 @@ A search over a namespace holding vectors made by another embedding model fails 
 
 ### Error bodies
 
-Service errors are returned as `{ "error": "...", "code": "..." }` (with `isError: true`). Branch on `code` (`NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT`, `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR`, `EMBEDDING_MODEL_MISMATCH`, `CONFIG_ERROR`), not on message text.
+Every tool error is returned as `{ "error": "...", "code": "..." }` in `content[0].text` (with `isError: true` and no `structuredContent`), including arguments that fail the input schema, which 2.x answered in plain text. Branch on `code` (`NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT`, `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR`, `EMBEDDING_MODEL_MISMATCH`, `CONFIG_ERROR`, `UPSTREAM_ERROR`, `INTERNAL_ERROR`), not on message text.
 
 ## Operators
 
@@ -128,7 +137,8 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 
 - `ConceptService.search()` returns `{ id, namespace, score, tags, representations }`. The option `{ crossNamespace: true }` is now `{ namespaces: '*' }`; `{ namespaces: ['a', 'b'] }` searches several namespaces.
 - `read(id, reps, { namespace })` and `delete(id, { namespace })` check the namespace when given. Omitting it keeps the unchecked, trusted behaviour for in-process callers.
-- `save()` accepts `autoEmbed` (default `false` at the service level), `derived` and `overwrite`, and throws `ValidationError`, `NamespaceDeniedError` and `OverwriteRefusedError` in addition to `VersionConflictError`. `saveBatch(entries, { autoEmbed, batchSize })` is atomic.
+- `save()` accepts `autoEmbed` (default `false` at the service level), `source` (what the caller declares about the content it writes), `provenance` (exact provenance, for content your code derived), `overwrite`, `assertionStatus` and `ledgerRef`, and throws `ValidationError`, `NamespaceDeniedError` and `OverwriteRefusedError` in addition to `VersionConflictError`. `saveBatch(entries, { autoEmbed, batchSize })` is atomic. Concepts carry `provenance`, `assertionStatus` and `ledgerRef`; search and list results carry `assertionStatus`.
+- Custom `DatabaseAdapter` implementations must store `provenance` (JSON text, default `'{}'`), `assertion_status` and `ledger_ref`, return `assertion_status` in `ListRow` and `ConceptMetaRow`, and apply `assertionStatus` filters in `listConcepts()` and inside the KNN query of `vectorSearch()`.
 - Custom `DatabaseAdapter` implementations must add `applyWrites(writes)`, which applies inserts, conditional updates (`WHERE version = expectedVersion`) and deletes atomically, keeping the vector index in step. They must also accept `vectorSearch(query, k, { namespaces, tags })` with the filters applied inside the KNN query and `distance` as cosine distance, and `upsertVector(id, namespace, embedding)`.
 - `IndexSyncService` (`src/services/index-sync.service.ts`), `rebuildFaissIndex` (`src/sidecar/faiss.ts`) and the PolyVault FAISS client (`src/lib/polyvault/faiss-client.ts`) are removed. Call `runRestoreE2E(client, db, options)` without the FAISS client, and drop `faissMode` and `result.faiss`.
 - Custom `DatabaseAdapter` implementations must also store `embedding_model` with each vector and implement `countForeignVectors(model, namespaces)`, `findForeignVectors(model, namespace, afterId, limit)` and `labelLegacyVectors(model)`.

@@ -225,8 +225,14 @@ describe('Batch embedding ingestion', () => {
         '# needs embedding 2',
       ]);
       expect(result.saved.every(c => c.embedding?.length === VECTOR_DIMENSION)).toBe(true);
-      expect(result.saved[1]!.derived).toEqual({});
-      expect(result.saved[0]!.derived).toEqual({ vector: { from: 'markdown' } });
+      expect(result.saved[1]!.provenance).toEqual({
+        markdown: { origin: 'user' },
+        vector: { origin: 'user' },
+      });
+      expect(result.saved[0]!.provenance).toEqual({
+        markdown: { origin: 'user' },
+        vector: { origin: 'derived', derivedFrom: 'markdown', model: 'Xenova/all-MiniLM-L6-v2' },
+      });
     });
   });
 });

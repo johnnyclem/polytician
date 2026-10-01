@@ -76,3 +76,10 @@ export class EmbeddingModelMismatchError extends PolyticianError {
     );
   }
 }
+
+/** A remote service (AgentVault) failed or answered with an error. */
+export class UpstreamError extends PolyticianError {
+  constructor(message: string) {
+    super(message, 'UPSTREAM_ERROR');
+  }
+}

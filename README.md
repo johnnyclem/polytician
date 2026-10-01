@@ -160,9 +160,11 @@ In the config file, string values may reference environment variables as `${NAME
 
 ## Tools Reference
 
-All tools return `{ "content": [{ "type": "text", "text": "<JSON>" }] }`; the examples below show the decoded JSON payload for brevity. Authoritative schemas live in `src/server.ts`.
+Every tool declares an `outputSchema` and returns its result as `structuredContent` (an object, checked against that schema before it is sent), with the same JSON in `content[0].text` for clients that read text. The examples below show that JSON. Input schemas live in `src/server.ts`, output schemas in `src/mcp/output-schemas.ts`; `tools/list` serves both as JSON Schema.
 
-Every tool's input schema is strict: an unknown argument is a validation error, not silently dropped. Every tool that takes a `namespace` defaults it to `"default"`. Errors from the service come back with `isError: true` and a JSON body `{ "error", "code" }`, where `code` is one of `NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT` (plus `currentVersion`), `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR`, `EMBEDDING_MODEL_MISMATCH` (see `reembed_concepts`) or `CONFIG_ERROR` (the server is missing configuration the call needs, such as a backup key). Arguments that fail the input schema (an unknown key, a wrong type) come back as `isError: true` with a plain-text `Input validation error: ...` naming the offending keys.
+Every tool carries the MCP annotations `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`. Reads are read-only; `save_concept`, `batch_save_concepts`, `delete_concept`, `convert_concept`, `reembed_concepts` and `import_backup` are destructive (they can replace or remove stored content). `openWorldHint` is true on the writing tools only when the operator enabled AgentVault sync push or archival, on `convert_concept` also when `POLYTICIAN_LLM_PROVIDER=agentvault`, and always on the `vault_*` tools.
+
+Every tool's input schema is strict: an unknown argument is a validation error, not silently dropped. Every tool that takes a `namespace` defaults it to `"default"`. Every error comes back with `isError: true`, no `structuredContent`, and a JSON body `{ "error", "code" }` in `content[0].text`, where `code` is one of `NOT_FOUND`, `VALIDATION_ERROR` (including arguments that fail the input schema: an unknown key, a wrong type), `VERSION_CONFLICT` (plus `currentVersion`), `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR`, `EMBEDDING_MODEL_MISMATCH` (see `reembed_concepts`), `CONFIG_ERROR` (the server is missing configuration the call needs, such as a backup key), `UPSTREAM_ERROR` (AgentVault failed) or `INTERNAL_ERROR`.
 
 Input caps: markdown ≤ 1,000,000 characters, thoughtform ≤ 2,000,000 characters of JSON, ≤ 64 tags of ≤ 128 characters, ≤ 500 concepts per batch, query/`embed_text` text ≤ 100,000 characters. Namespaces match `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`. Embeddings must have exactly 384 finite components and must not be all zero.
 
@@ -177,7 +179,14 @@ Create or update a concept. A new concept needs at least one representation (`ma
   "tags": ["physics", "history"]
 }
 // Response
-{ "id": "...", "namespace": "default", "version": 1, "tags": ["physics", "history"], "derived": { "vector": { "from": "markdown" } }, ... }
+{
+  "id": "...", "namespace": "default", "version": 1, "tags": ["physics", "history"],
+  "provenance": {
+    "markdown": { "origin": "user" },
+    "vector": { "origin": "derived", "derivedFrom": "markdown", "model": "Xenova/all-MiniLM-L6-v2" }
+  },
+  "assertionStatus": null, "ledgerRef": null, ...
+}
 ```
 
 - **Auto-embedding** (`autoEmbed`, default `true`): when no `embedding` is passed, the vector is computed from the markdown written (or, for a thoughtform-only concept, its `rawText`), so the concept is immediately searchable. It never replaces a vector you supplied yourself; pass `autoEmbed: false` to skip it.
@@ -185,10 +194,12 @@ Create or update a concept. A new concept needs at least one representation (`ma
 - **Namespaces**: an update must name the namespace the concept lives in (`NAMESPACE_DENIED` otherwise). Concepts cannot move between namespaces.
 - **Atomicity**: the concept row and its vector are written in one transaction.
 - **`thoughtform`** must be either the native shape (`rawText`, ISO-timestamp `metadata`, `entities` with `text`/`type`/`confidence`/`offset`) or a PolyVault v1 ThoughtForm (`schemaVersion`, epoch-ms `metadata`, `entities` with `value`). Free-form JSON is rejected.
+- **Provenance** (`source`, optional): `{ "origin"?: "user" | "import", "createdBy"?, "model"? }` is recorded on every representation the call writes (default `{ "origin": "user" }`); `createdBy` is also recorded on the vector auto-embedded from it. See [Provenance and assertion status](#provenance-and-assertion-status).
+- **Truth status** (`assertionStatus`, `ledgerRef`, optional): `"asserted"`, `"verified"`, `"contested"` or `"retracted"`, and the ledger entry the concept mirrors. `null` clears either; omitting it keeps the stored value.
 
 ### `read_concept`
 
-`{ "id": "...", "namespace"?, "representations"?: ["vector"|"markdown"|"thoughtform"] }` → the concept, optionally filtered to the requested representations. `derived` lists the representations that were derived rather than written by a caller, with their provenance (`from`, and `provider`/`sources` for LLM conversions). A concept in another namespace is `NOT_FOUND`.
+`{ "id": "...", "namespace"?, "representations"?: ["vector"|"markdown"|"thoughtform"] }` → the concept, optionally filtered to the requested representations, with `provenance` (where each representation came from), `assertionStatus` and `ledgerRef`. A concept in another namespace is `NOT_FOUND`.
 
 ### `delete_concept`
 
@@ -196,11 +207,11 @@ Create or update a concept. A new concept needs at least one representation (`ma
 
 ### `list_concepts`
 
-`{ "namespace"?, "limit"? (≤100, default 50), "offset"?, "tags"? }` → paginated concepts in the namespace carrying every listed tag (exact match), with a `representations` flag per concept (`vector: false` means it is not searchable).
+`{ "namespace"?, "limit"? (≤100, default 50), "offset"?, "tags"?, "assertionStatus"? }` → `{ "concepts": [...], "total" }`: paginated concepts in the namespace carrying every listed tag (exact match), and, with `assertionStatus` (a list), only those with one of the listed statuses. Each has a `representations` flag (`vector: false` means it is not searchable) and its `assertionStatus`.
 
 ### `batch_save_concepts`
 
-`{ "concepts": [{ "id"?, "expectedVersion"?, "markdown"?, "thoughtform"?, "embedding"?, "tags"? }, ...], "namespace"?, "autoEmbed"?, "batchSize"? }` → `{ "count", "ids": [...] }`. The batch is atomic: every entry is validated (and embedded, once, in batches of `batchSize`, default 50) before anything is written, and then all entries are written in one transaction or none are. `autoEmbed` defaults to `true`, as in `save_concept`.
+`{ "concepts": [{ "id"?, "expectedVersion"?, "markdown"?, "thoughtform"?, "embedding"?, "tags"?, "source"?, "assertionStatus"?, "ledgerRef"? }, ...], "namespace"?, "autoEmbed"?, "batchSize"? }` → `{ "count", "ids": [...] }`. The batch is atomic: every entry is validated (and embedded, once, in batches of `batchSize`, default 50) before anything is written, and then all entries are written in one transaction or none are. `autoEmbed` defaults to `true`, as in `save_concept`.
 
 ### `search_concepts`
 
@@ -208,15 +219,15 @@ Semantic similarity search. Provide exactly one of `query` (auto-embedded) or a 
 
 ```json
 // Request
-{ "query": "famous physicists", "k": 5, "namespace": "default", "tags"?: ["history"] }
+{ "query": "famous physicists", "k": 5, "namespace": "default", "tags"?: ["history"], "assertionStatus"?: ["verified"] }
 // Response
-[{ "id": "...", "namespace": "default", "score": 0.83, "tags": ["physics", "history"], "representations": { ... } }]
+{ "results": [{ "id": "...", "namespace": "default", "score": 0.83, "tags": ["physics", "history"], "representations": { ... }, "assertionStatus": null }] }
 ```
 
 - `score` is `(1 + cosine similarity) / 2`, in `[0, 1]` (1 = same direction as the query, 0.5 = orthogonal). Results are ordered by score, and equal scores by id.
-- The namespace and `tags` (every tag, exact match) filters run inside the vector query. With sqlite-vec the namespace is the vec0 partition key and tags restrict the candidate ids. With pgvector they are SQL `WHERE` clauses on an HNSW iterative scan (pgvector ≥ 0.8) or an exact scan (older pgvector). So the top-k is the top-k of the matching concepts, not a filtered global top-k.
+- The namespace, `tags` (every tag, exact match) and `assertionStatus` (one of the listed statuses; concepts without a status are left out) filters run inside the vector query. With sqlite-vec the namespace is the vec0 partition key and tags restrict the candidate ids. With pgvector they are SQL `WHERE` clauses on an HNSW iterative scan (pgvector ≥ 0.8) or an exact scan (older pgvector). So the top-k is the top-k of the matching concepts, not a filtered global top-k.
 - On sqlite-vec the search is exact (brute-force KNN). On pgvector it is an HNSW approximate search, so recall is high but not guaranteed.
-- `crossNamespace: true` searches every namespace in `POLYTICIAN_NAMESPACES` (all of them if it is `*`). It fails with `NAMESPACE_DENIED` when the operator has not set `POLYTICIAN_NAMESPACES`.
+- `crossNamespace: true` searches every namespace in `POLYTICIAN_NAMESPACES` (all of them if it is `*`). It fails with `NAMESPACE_DENIED` when the operator has not set `POLYTICIAN_NAMESPACES`, and with `VALIDATION_ERROR` when `namespace` is passed too.
 - Every stored vector records the embedding model it belongs to (the configured `POLYTICIAN_EMBEDDING_MODEL` when it was written). If any vector in the searched namespaces was made by a different model, the search fails with `EMBEDDING_MODEL_MISMATCH` instead of ranking incomparable vectors; run `reembed_concepts`.
 
 ### `reembed_concepts`
@@ -227,13 +238,13 @@ Semantic similarity search. Provide exactly one of `query` (auto-embedded) or a 
 
 `{ "id": "...", "namespace"?, "from": "vector"|"markdown"|"thoughtform", "to": "vector"|"markdown"|"thoughtform", "overwrite"? }` → `{ "converted": { "from", "to" }, "concept": {...} }`
 
-The result is stored as a **derived** representation (see `derived` in `read_concept`). A conversion never replaces an **authored** representation (one a caller wrote) unless `overwrite: true`; otherwise it fails with `OVERWRITE_REFUSED`. Replacing an earlier derived one is allowed. The write is conditional on the version the source was read at, so a concurrent edit of the source surfaces as `VERSION_CONFLICT`.
+The result is stored with provenance origin `derived`, or `llm` when an LLM wrote it (see `provenance` in `read_concept`). A conversion never replaces an **authored** representation (origin `user` or `import`, or one stored before 3.0) unless `overwrite: true`; otherwise it fails with `OVERWRITE_REFUSED`. Replacing an earlier derived or LLM-made one is allowed. The write is conditional on the version the source was read at, so a concurrent edit of the source surfaces as `VERSION_CONFLICT`.
 
 | Conversion | Requires an LLM? |
 |---|---|
 | `thoughtform → vector`, `thoughtform → markdown`, `markdown → vector` | No. `markdown → vector` and `thoughtform → vector` depend on the embedding model; `thoughtform → markdown` is a fixed template |
 | `markdown → thoughtform` | Yes: set `POLYTICIAN_LLM_PROVIDER`, or `POLYTICIAN_NLP_PIPELINE=rule-based` |
-| `vector → markdown`, `vector → thoughtform` | Yes: set `POLYTICIAN_LLM_PROVIDER`. The LLM is given the concept's nearest neighbours **from its own namespace**, and their ids are recorded in `derived.<rep>.sources`. There is no non-LLM path, because a vector cannot be decoded back into text |
+| `vector → markdown`, `vector → thoughtform` | Yes: set `POLYTICIAN_LLM_PROVIDER`. The LLM is given the concept's nearest neighbours **from its own namespace**, and their ids are recorded in `provenance.<rep>.sources`. There is no non-LLM path, because a vector cannot be decoded back into text |
 
 ### `embed_text`
 
@@ -294,6 +305,21 @@ A **concept** is the unit of memory. Any subset of its three representations can
 ```
 
 `convert_concept` moves between these on demand: without an LLM for the vector/markdown/thoughtform-derived paths, and via your configured LLM or NLP pipeline for the paths that need to *generate* rather than *derive* content.
+
+### Provenance and assertion status
+
+Every representation records where it came from in the concept's `provenance` map:
+
+| `origin` | Meaning | Set by |
+|---|---|---|
+| `user` | Written by a caller | `save_concept` / `batch_save_concepts` (the default) |
+| `import` | Copied in from outside this server | `source: { origin: "import" }`, `vault_memory_pull`, PolyVault restores |
+| `derived` | Computed without an LLM; `model` names the embedding model or NLP pipeline | Auto-embedding, `convert_concept` (non-LLM paths), `reembed_concepts` |
+| `llm` | Written by an LLM; `model` names the provider, `sources` the neighbour concepts it was given | `convert_concept` (LLM paths), `vault_infer` with `saveAsConceptNamespace` |
+
+`derivedFrom` names the representation derived or LLM content was made from. `createdBy` is whatever the caller passed in `source.createdBy`: it is recorded for audit and is not authenticated. `user` and `import` content counts as authored, so a conversion or re-embedding replaces it only with `overwrite: true`. Representations stored before 3.0 have no recorded provenance and count as authored too. `import_backup` restores provenance as it was exported.
+
+A concept that records a claim, such as an entry from stenographer's truth ledger, can also carry `assertionStatus` and `ledgerRef`. One way to map stenographer's statuses: an active TB → `asserted` (or `verified` once you have checked its notarization), a contested TB → `contested`, an overridden or struck TB → `retracted`; an open UV → `asserted`, a verified UV → `verified`, a refuted UV → `retracted`. Use the entry id (or its `hash`) as `ledgerRef`, `source: { origin: "import", createdBy: "stenographer" }`, and update the status when the ledger appends a TRANSITION. Polytician stores the status it is given and never checks it against the ledger, so `assertionStatus: ["verified"]` on `search_concepts` returns what the writer marked verified, not independently verified facts.
 
 ### Namespaces
 
@@ -424,7 +450,7 @@ AgentVault's `polytician-enricher` (`src/orchestration/polytician-enricher.ts` i
 | `search_concepts { query, limit, min_score }` | `isError: true`, `... Unrecognized key(s) in object: 'limit', 'min_score'` | `search_concepts { query, k: limit, namespace? }`, then drop results whose `score` is below `min_score` on the client |
 | `read_concept { id }` | Works | Same; the text is the `markdown` field |
 
-Results are JSON in `content[0].text` (parse it); there is no `content[0].data`. `save_concept` returns the concept, including its `id`; `search_concepts` returns an array of `{ id, namespace, score, tags, representations }` (no `name`). Contract tests that replay AgentVault's calls are in `tests/mcp-contract.test.ts`.
+Results are JSON objects in `structuredContent`, and the same JSON is in `content[0].text`; there is no `content[0].data`. `save_concept` returns the concept, including its `id`; `search_concepts` returns `{ results: [{ id, namespace, score, tags, representations, assertionStatus }] }` (no `name`). Contract tests that replay AgentVault's calls are in `tests/mcp-contract.test.ts`.
 
 See also:
 
@@ -509,7 +535,7 @@ npm run quality:fix  # lint:fix + format
 
 ### Adding a New Tool
 
-Register it in `src/server.ts` with `server.tool(name, description, zodInputShape, handler)` — see any existing tool for the pattern of validating input, calling into a service in `src/services/`, and returning `jsonResult(...)` / `errorResult(...)`.
+Register it in `src/server.ts` with `server.registerTool(name, { description, inputSchema, outputSchema, annotations }, handler)`. The input schema is a `.strict()` zod object, the output schema a strict zod object in `src/mcp/output-schemas.ts`, and the annotations set all four hints. The handler wraps its body in `runTool(...)`, calls into a service in `src/services/`, and returns `jsonResult(...)`; a thrown `PolyticianError` becomes a coded error result. Add the tool to the OpenAPPA battery in `integrations/openappa/` (see its README), or APPA blocks it.
 
 ---
 

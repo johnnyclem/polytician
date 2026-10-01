@@ -118,7 +118,7 @@ describe('backup tools', () => {
     expect(read.body['markdown']).toBe('# Before the migration');
     expect(read.body['tags']).toEqual(['keep']);
     const search = await call('search_concepts', { query: '# Other agent memory', namespace: 'work', k: 1 });
-    expect((search.body as unknown as Array<{ id: string }>)[0]?.id).toBe(workId);
+    expect((search.body['results'] as Array<{ id: string }>)[0]?.id).toBe(workId);
   });
 
   it('exports only the allowlisted namespaces when POLYTICIAN_NAMESPACES is a list', async () => {

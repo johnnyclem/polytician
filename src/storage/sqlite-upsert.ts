@@ -7,6 +7,20 @@
 
 import type { DatabaseAdapter, ConceptRow } from '../db/adapter.js';
 import type { ThoughtFormV1 } from '../schemas/thoughtform.js';
+import type { ProvenanceMap } from '../types/concept.js';
+
+/** Provenance JSON of a row after a restore wrote its thoughtform (and markdown, from rawText). */
+function importedProvenance(existing: string | undefined, markdownWritten: boolean): string {
+  let provenance: ProvenanceMap = {};
+  try {
+    provenance = JSON.parse(existing ?? '{}') as ProvenanceMap;
+  } catch {
+    // Unreadable provenance is replaced.
+  }
+  provenance.thoughtform = { origin: 'import' };
+  if (markdownWritten) provenance.markdown = { origin: 'import' };
+  return JSON.stringify(provenance);
+}
 
 export interface UpsertResult {
   inserted: number;
@@ -65,6 +79,7 @@ export async function upsertThoughtforms(
         tags: JSON.stringify(tags),
         thoughtform: JSON.stringify(tf),
         markdown: tf.rawText ?? existing.markdown,
+        provenance: importedProvenance(existing.provenance, tf.rawText !== undefined),
       });
       updated++;
     } else {
@@ -80,6 +95,7 @@ export async function upsertThoughtforms(
         markdown: tf.rawText ?? null,
         thoughtform: JSON.stringify(tf),
         embedding: null,
+        provenance: importedProvenance(undefined, tf.rawText !== undefined),
       };
       await adapter.insertConcept(row);
       inserted++;

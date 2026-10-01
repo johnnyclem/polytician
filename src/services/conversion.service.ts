@@ -1,4 +1,9 @@
-import type { Concept, Provenance, RepresentationType } from '../types/concept.js';
+import {
+  isMachineMade,
+  type Concept,
+  type Provenance,
+  type RepresentationType,
+} from '../types/concept.js';
 import type { ThoughtForm } from '../types/thoughtform.js';
 import {
   StoredThoughtFormSchema,
@@ -84,7 +89,11 @@ export class ConversionService {
       );
     }
     // Checked again atomically on save; failing early avoids a wasted LLM call.
-    if (hasRepresentation(concept, to) && !concept.derived?.[to] && !options.overwrite) {
+    if (
+      hasRepresentation(concept, to) &&
+      !isMachineMade(concept.provenance?.[to]) &&
+      !options.overwrite
+    ) {
       throw new OverwriteRefusedError(id, to);
     }
 
@@ -94,7 +103,7 @@ export class ConversionService {
       id,
       namespace: concept.namespace,
       expectedVersion: concept.version,
-      derived: { [derivation.to]: derivation.provenance },
+      provenance: { [derivation.to]: derivation.provenance },
       overwrite: options.overwrite,
     };
     if (derivation.to === 'vector') save.embedding = derivation.value;
@@ -131,7 +140,15 @@ export class ConversionService {
   private async markdownToVector(concept: ReadConcept): Promise<Derivation> {
     const markdown = this.requireMarkdown(concept);
     const value = await embeddingService.embed(markdown);
-    return { to: 'vector', value, provenance: { from: 'markdown' } };
+    return {
+      to: 'vector',
+      value,
+      provenance: {
+        origin: 'derived',
+        derivedFrom: 'markdown',
+        model: embeddingService.getModel(),
+      },
+    };
   }
 
   private async thoughtformToVector(concept: ReadConcept): Promise<Derivation> {
@@ -140,7 +157,15 @@ export class ConversionService {
     if (!text)
       throw new ConversionError(`Concept '${concept.id}' thoughtform has no text to embed.`);
     const value = await embeddingService.embed(text);
-    return { to: 'vector', value, provenance: { from: 'thoughtform' } };
+    return {
+      to: 'vector',
+      value,
+      provenance: {
+        origin: 'derived',
+        derivedFrom: 'thoughtform',
+        model: embeddingService.getModel(),
+      },
+    };
   }
 
   private async thoughtformToMarkdown(concept: ReadConcept): Promise<Derivation> {
@@ -176,7 +201,11 @@ export class ConversionService {
       }
     }
 
-    return { to: 'markdown', value: lines.join('\n'), provenance: { from: 'thoughtform' } };
+    return {
+      to: 'markdown',
+      value: lines.join('\n'),
+      provenance: { origin: 'derived', derivedFrom: 'thoughtform' },
+    };
   }
 
   // --- LLM / NLP pipeline conversions ---
@@ -189,7 +218,7 @@ export class ConversionService {
     const markdown = this.requireMarkdown(concept);
 
     let extracted: ThoughtFormEntities;
-    let provider: string;
+    let provenance: Provenance;
 
     if (this.nlpPipeline) {
       // Use configurable NLP pipeline with dependency parsing enabled
@@ -200,16 +229,16 @@ export class ConversionService {
         minConfidence: nlp.minConfidence,
       };
       extracted = await this.nlpPipeline.extractEntities(markdown, pipelineOptions);
-      provider = this.nlpPipeline.name;
+      provenance = { origin: 'derived', derivedFrom: 'markdown', model: this.nlpPipeline.name };
     } else {
       // Fall back to LLM-based entity extraction
       this.requireLLM('markdown -> thoughtform (without POLYTICIAN_NLP_PIPELINE=rule-based)');
       extracted = await this.llmProvider.extractEntities(markdown);
-      provider = this.llmProvider.name;
+      provenance = { origin: 'llm', derivedFrom: 'markdown', model: this.llmProvider.name };
     }
 
     const thoughtform = this.buildThoughtForm(concept.id, markdown, extracted);
-    return { to: 'thoughtform', value: thoughtform, provenance: { from: 'markdown', provider } };
+    return { to: 'thoughtform', value: thoughtform, provenance };
   }
 
   /**
@@ -231,8 +260,9 @@ export class ConversionService {
       to: 'markdown',
       value: markdown,
       provenance: {
-        from: 'vector',
-        provider: this.llmProvider.name,
+        origin: 'llm',
+        derivedFrom: 'vector',
+        model: this.llmProvider.name,
         sources: neighbors.map(n => n.id),
       },
     };
@@ -251,8 +281,9 @@ export class ConversionService {
       to: 'thoughtform',
       value: thoughtform,
       provenance: {
-        from: 'vector',
-        provider: this.llmProvider.name,
+        origin: 'llm',
+        derivedFrom: 'vector',
+        model: this.llmProvider.name,
         sources: neighbors.map(n => n.id),
       },
     };

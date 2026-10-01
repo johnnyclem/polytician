@@ -205,7 +205,10 @@ describe('ConversionService — Non-LLM paths', () => {
 
       const result = await concepts.read(id);
       expect(result.markdown).toContain('Albert Einstein');
-      expect(result.derived).toEqual({ markdown: { from: 'thoughtform' } });
+      expect(result.provenance).toEqual({
+        thoughtform: { origin: 'user' },
+        markdown: { origin: 'derived', derivedFrom: 'thoughtform' },
+      });
     });
 
     it('should re-derive a previously derived representation without overwrite', async () => {
@@ -226,7 +229,7 @@ describe('ConversionService — Non-LLM paths', () => {
       await conversions.convert(id, 'thoughtform', 'markdown');
       await concepts.save({ id, markdown: '# My own edit' });
 
-      expect((await concepts.read(id)).derived).toEqual({});
+      expect((await concepts.read(id)).provenance?.markdown).toEqual({ origin: 'user' });
       await expect(conversions.convert(id, 'thoughtform', 'markdown')).rejects.toThrow(
         OverwriteRefusedError
       );
@@ -424,9 +427,10 @@ describe('ConversionService — LLM-assisted vector-to-markdown', () => {
     }
     expect(capturedOptions!.conceptId).toBe(targetId);
 
-    // The result is recorded as derived, with the neighbours it came from
-    expect(result.derived).toEqual({
-      markdown: { from: 'vector', provider: 'mock', sources: [neighborId] },
+    // The result is recorded as LLM output, with the neighbours it came from
+    expect(result.provenance).toEqual({
+      vector: { origin: 'user' },
+      markdown: { origin: 'llm', derivedFrom: 'vector', model: 'mock', sources: [neighborId] },
     });
   });
 

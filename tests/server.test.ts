@@ -183,10 +183,10 @@ describe('MCP Server — Tool integration', () => {
     await callTool('convert_concept', { id, from: 'markdown', to: 'vector' });
 
     // Search
-    const results = await callTool('search_concepts', {
+    const { results } = await callTool('search_concepts', {
       query: 'Marie Curie radioactivity',
       k: 5,
-    }) as Array<{ id: string; representations: { vector: boolean; markdown: boolean; thoughtform: boolean } }>;
+    }) as { results: Array<{ id: string; representations: { vector: boolean; markdown: boolean; thoughtform: boolean } }> };
 
     expect(Array.isArray(results)).toBe(true);
     const found = results.find(r => r.id === id);
@@ -361,11 +361,11 @@ describe('MCP Server — Tool integration', () => {
     });
     await callTool('save_concept', { namespace: 'agent-b', markdown: '# Agent B data' });
 
-    const results = await callTool('search_concepts', {
+    const { results } = await callTool('search_concepts', {
       query: 'Agent data',
       namespace: 'agent-a',
       k: 10,
-    }) as Array<{ namespace: string }>;
+    }) as { results: Array<{ namespace: string }> };
 
     expect(Array.isArray(results)).toBe(true);
     for (const r of results) {
@@ -393,11 +393,11 @@ describe('MCP Server — Tool integration', () => {
     }) as { id: string };
     await callTool('convert_concept', { id: savedB.id, from: 'markdown', to: 'vector' });
 
-    const results = await callTool('search_concepts', {
+    const { results } = await callTool('search_concepts', {
       query: 'Cross namespace test',
       crossNamespace: true,
       k: 10,
-    }) as Array<{ namespace: string }>;
+    }) as { results: Array<{ namespace: string }> };
 
     expect(Array.isArray(results)).toBe(true);
     const namespaces = new Set(results.map(r => r.namespace));

@@ -15,6 +15,10 @@ export const LIMITS = {
   batchEntries: 500,
   /** Characters of text passed to the embedder (search query, embed_text). */
   queryChars: 100_000,
+  /** Characters of a provenance `model` or `createdBy`. */
+  provenanceChars: 200,
+  /** Characters of a concept's `ledgerRef`. */
+  ledgerRefChars: 512,
 } as const;
 
 /** Largest finite float32. Larger magnitudes overflow to Infinity when stored. */

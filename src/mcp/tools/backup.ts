@@ -6,6 +6,7 @@ import { exportBackup, importBackup } from '../../services/backup.service.js';
 import { backupsDir, listBackupFiles } from '../../backup/files.js';
 import { NamespaceSchema } from '../../types/concept.js';
 import { jsonResult, runTool } from '../tool-result.js';
+import { ExportBackupOut, ImportBackupOut, ListBackupsOut } from '../output-schemas.js';
 
 /**
  * Registers export_backup, import_backup and list_backups. Backups are files
@@ -30,7 +31,13 @@ export function registerBackupTools(server: McpServer): void {
             ),
         })
         .strict(),
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      outputSchema: ExportBackupOut,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
     async ({ namespace, encrypt }) =>
       runTool('export_backup', async () => {
@@ -72,7 +79,13 @@ export function registerBackupTools(server: McpServer): void {
             ),
         })
         .strict(),
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      outputSchema: ImportBackupOut,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
     async ({ file, namespace, onConflict, reembed }) =>
       runTool('import_backup', async () => {
@@ -92,7 +105,13 @@ export function registerBackupTools(server: McpServer): void {
       description:
         "List the backup files in the server's backups directory, newest first, from their headers: file name, size, creation time, embedding model, and whether (and with which key id) each is encrypted.",
       inputSchema: z.object({}).strict(),
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      outputSchema: ListBackupsOut,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async () =>
       runTool('list_backups', async () =>

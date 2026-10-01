@@ -296,6 +296,6 @@ describe('Migration from a 2.x SQLite database', () => {
     const repaired = await migrated.read(corrupt);
     expect(repaired.embedding).toBeUndefined();
     expect(repaired.markdown).toBe('corrupt');
-    expect(repaired.derived).toEqual({});
+    expect(repaired.provenance).toEqual({});
   });
 });
