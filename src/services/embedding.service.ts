@@ -1,44 +1,53 @@
 import { VECTOR_DIMENSION } from '../types/concept.js';
 import { getConfig } from '../config.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let pipelineFn: ((text: string, options?: Record<string, unknown>) => Promise<any>) | null = null;
-let loading: Promise<void> | null = null;
+type FeatureExtractor = (
+  text: string,
+  options?: Record<string, unknown>
+) => Promise<{ data: ArrayLike<number> }>;
 
-async function loadModel(): Promise<void> {
-  if (pipelineFn) return;
-  if (loading) {
-    await loading;
-    return;
-  }
+let pipelineFn: FeatureExtractor | null = null;
+let loading: Promise<FeatureExtractor> | null = null;
 
-  loading = (async (): Promise<void> => {
-    const { pipeline, env } = await import('@xenova/transformers');
+/**
+ * Load the configured model once. Concurrent callers share one attempt; a
+ * failed attempt (say, the first download while offline) is not cached, so
+ * the next call tries again instead of failing until restart.
+ */
+async function loadModel(): Promise<FeatureExtractor> {
+  if (pipelineFn) return pipelineFn;
+  loading ??= (async (): Promise<FeatureExtractor> => {
+    const { pipeline, env } = await import('@huggingface/transformers');
     const config = getConfig();
     env.cacheDir = config.modelsDir;
-
-    pipelineFn = (await pipeline('feature-extraction', config.embeddingModel, {
-      quantized: true,
-    })) as unknown as (
-      text: string,
-      options?: Record<string, unknown>
-    ) => Promise<{ data: Float32Array }>;
+    // q8 is the quantized ONNX export (model_quantized.onnx), as 2.x loaded.
+    const extractor = await pipeline('feature-extraction', config.embeddingModel, {
+      dtype: 'q8',
+    });
+    return extractor as unknown as FeatureExtractor;
   })();
-
-  await loading;
+  try {
+    pipelineFn = await loading;
+    return pipelineFn;
+  } finally {
+    loading = null;
+  }
 }
 
 export class EmbeddingService {
+  /**
+   * Mean-pooled, normalized embedding of `text`. The vector index stores
+   * VECTOR_DIMENSION components, so a model with any other output size is an
+   * error rather than a silently truncated vector.
+   */
   async embed(text: string): Promise<number[]> {
-    await loadModel();
-    if (!pipelineFn) throw new Error('Embedding model failed to load');
-
-    const output = await pipelineFn(text, { pooling: 'mean', normalize: true });
-    const embedding = Array.from(output.data as Float32Array).slice(0, VECTOR_DIMENSION);
+    const extract = await loadModel();
+    const output = await extract(text, { pooling: 'mean', normalize: true });
+    const embedding = Array.from(output.data);
 
     if (embedding.length !== VECTOR_DIMENSION) {
       throw new Error(
-        `Embedding dimension mismatch: expected ${VECTOR_DIMENSION}, got ${embedding.length}`
+        `Embedding model ${getConfig().embeddingModel} produces ${embedding.length}-dimensional vectors; polytician stores ${VECTOR_DIMENSION}-dimensional vectors, so choose a ${VECTOR_DIMENSION}-dimensional model`
       );
     }
 
@@ -52,7 +61,6 @@ export class EmbeddingService {
    */
   async embedBatch(texts: string[], batchSize: number = 50): Promise<number[][]> {
     await loadModel();
-    if (!pipelineFn) throw new Error('Embedding model failed to load');
 
     const results: number[][] = [];
 
@@ -71,6 +79,11 @@ export class EmbeddingService {
 
   getDimension(): number {
     return VECTOR_DIMENSION;
+  }
+
+  /** The model id recorded with every vector this service produces. */
+  getModel(): string {
+    return getConfig().embeddingModel;
   }
 }
 

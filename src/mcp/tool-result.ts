@@ -24,7 +24,8 @@ export function errorResult(payload: Record<string, unknown>): ToolResult {
 /**
  * `{ error, code }` for errors with a stable code (NOT_FOUND, VALIDATION_ERROR,
  * VERSION_CONFLICT + currentVersion, NAMESPACE_DENIED, OVERWRITE_REFUSED,
- * CONVERSION_ERROR); `{ error }` for anything else.
+ * CONVERSION_ERROR, EMBEDDING_MODEL_MISMATCH, CONFIG_ERROR); `{ error }` for
+ * anything else.
  */
 export function errorPayload(err: unknown): Record<string, unknown> {
   if (err instanceof VersionConflictError) {

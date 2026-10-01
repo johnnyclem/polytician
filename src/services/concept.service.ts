@@ -16,6 +16,7 @@ import {
 } from '../types/thoughtform.js';
 import { LIMITS, NAMESPACE_PATTERN } from '../types/limits.js';
 import {
+  EmbeddingModelMismatchError,
   NamespaceDeniedError,
   NotFoundError,
   OverwriteRefusedError,
@@ -94,6 +95,20 @@ export interface SearchOptions {
   /** Several namespaces, or '*' for all. */
   namespaces?: readonly string[] | '*';
 }
+
+export type ReembedSkipReason = 'authored' | 'no-text' | 'changed';
+
+export interface ReembedOutcome {
+  /** The configured model the vectors now belong to. */
+  model: string;
+  reembedded: string[];
+  skipped: Array<{ id: string; reason: ReembedSkipReason }>;
+  /** Vectors in the namespace still made by another model. */
+  remaining: number;
+}
+
+/** Concepts read per page while looking for vectors to re-embed. */
+const REEMBED_PAGE = 100;
 
 interface PlannedWrite {
   write: ConceptWrite;
@@ -200,6 +215,17 @@ function autoEmbedSource(
     return text ? { text, from: 'thoughtform' } : null;
   }
   return null;
+}
+
+/** A row's thoughtform if it is valid JSON in a supported schema (2.x rows may hold free-form JSON). */
+function storedThoughtForm(raw: string | null): StoredThoughtForm | undefined {
+  if (raw === null) return undefined;
+  try {
+    const parsed = StoredThoughtFormSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function mergeTags(existing: string[], added: string[] | undefined, label: string): string[] {
@@ -338,6 +364,8 @@ export class ConceptService {
           markdown: r.markdown,
           thoughtform: r.thoughtform !== null ? JSON.stringify(r.thoughtform) : null,
           embedding: r.embedding !== null ? serializeEmbedding(r.embedding) : null,
+          // import_backup only keeps vectors made by the configured model.
+          embedding_model: r.embedding !== null ? embeddingService.getModel() : null,
           derived: JSON.stringify(r.derived),
         };
         if (!existing) {
@@ -504,6 +532,9 @@ export class ConceptService {
     const thoughtform =
       entry.thoughtform !== undefined ? JSON.stringify(entry.thoughtform) : undefined;
     const embeddingBuf = embedding !== undefined ? serializeEmbedding(embedding) : undefined;
+    // Every vector belongs to the configured model's space: auto-embedded ones
+    // were made by it, and supplied ones are ranked against its query vectors.
+    const embeddingModel = embeddingService.getModel();
 
     if (!existing) {
       if (entry.markdown === undefined && thoughtform === undefined && embedding === undefined) {
@@ -521,6 +552,7 @@ export class ConceptService {
         markdown: entry.markdown ?? null,
         thoughtform: thoughtform ?? null,
         embedding: embeddingBuf ?? null,
+        embedding_model: embeddingBuf ? embeddingModel : null,
         derived: JSON.stringify(derived),
       };
       return { write: { kind: 'insert', row }, row, created: true, embedding };
@@ -538,6 +570,7 @@ export class ConceptService {
       markdown: entry.markdown,
       thoughtform,
       embedding: embeddingBuf,
+      embedding_model: embeddingBuf ? embeddingModel : undefined,
       derived: derivedJson,
     };
     const row: ConceptRow = {
@@ -548,6 +581,7 @@ export class ConceptService {
       markdown: entry.markdown ?? existing.markdown,
       thoughtform: thoughtform ?? existing.thoughtform,
       embedding: embeddingBuf ?? existing.embedding,
+      embedding_model: embeddingBuf ? embeddingModel : existing.embedding_model,
       derived: derivedJson,
     };
     return {
@@ -678,6 +712,16 @@ export class ConceptService {
         : (options?.namespaces ?? [options?.namespace ?? 'default']);
     const filter = { namespaces, tags: tags && tags.length > 0 ? tags : undefined };
 
+    const model = embeddingService.getModel();
+    const foreign = await adapter.countForeignVectors(model, namespaces);
+    if (foreign > 0) {
+      const scope =
+        namespaces === null
+          ? 'the searched namespaces'
+          : `namespace${namespaces.length === 1 ? '' : 's'} ${namespaces.map(n => `'${n}'`).join(', ')}`;
+      throw new EmbeddingModelMismatchError(foreign, model, scope);
+    }
+
     // Fetch one extra row to see whether the k-th score is tied with rows
     // beyond it; if so, widen until the tied group is complete so the id
     // tie-break decides which of them make the cut.
@@ -720,6 +764,75 @@ export class ConceptService {
       });
     }
     return results;
+  }
+
+  /**
+   * Re-derive, from each concept's text (markdown, else thoughtform text),
+   * the vectors in `namespace` that another embedding model made, so the
+   * namespace can be searched with the configured model again. Authored
+   * vectors are replaced only with `overwrite`; concepts with no text, and
+   * concepts changed while this ran, are reported and left as they are.
+   */
+  async reembed(options: {
+    namespace: string;
+    overwrite?: boolean;
+    limit?: number;
+  }): Promise<ReembedOutcome> {
+    const { namespace } = options;
+    const limit = options.limit ?? LIMITS.batchEntries;
+    const model = embeddingService.getModel();
+    const adapter = getAdapter();
+    const reembedded: string[] = [];
+    const skipped: ReembedOutcome['skipped'] = [];
+
+    let cursor: string | null = null;
+    while (reembedded.length < limit) {
+      const ids = await adapter.findForeignVectors(model, namespace, cursor, REEMBED_PAGE);
+      if (ids.length === 0) break;
+
+      const work: Array<{ row: ConceptRow; text: string; from: 'markdown' | 'thoughtform' }> = [];
+      for (const id of ids) {
+        if (reembedded.length + work.length >= limit) break;
+        cursor = id;
+        const row = await adapter.findConcept(id);
+        if (!row || row.namespace !== namespace || row.embedding === null) continue;
+        const source = autoEmbedSource({
+          markdown: row.markdown ?? undefined,
+          thoughtform: storedThoughtForm(row.thoughtform),
+        });
+        if (!source) {
+          skipped.push({ id, reason: 'no-text' });
+          continue;
+        }
+        if (!parseDerived(row.derived).vector && !options.overwrite) {
+          skipped.push({ id, reason: 'authored' });
+          continue;
+        }
+        work.push({ row, ...source });
+      }
+
+      if (work.length === 0) continue;
+      const vectors = await embeddingService.embedBatch(work.map(w => w.text));
+      for (const [i, { row, from }] of work.entries()) {
+        try {
+          await this.save({
+            id: row.id,
+            namespace,
+            expectedVersion: row.version,
+            embedding: vectors[i],
+            derived: { vector: { from } },
+            overwrite: true,
+          });
+          reembedded.push(row.id);
+        } catch (err) {
+          if (!(err instanceof VersionConflictError)) throw err;
+          skipped.push({ id: row.id, reason: 'changed' });
+        }
+      }
+    }
+
+    const remaining = await adapter.countForeignVectors(model, [namespace]);
+    return { model, reembedded, skipped, remaining };
   }
 
   async getStats(namespace?: string): Promise<{

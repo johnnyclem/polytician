@@ -16,6 +16,12 @@ export interface ConceptRow {
   markdown: string | null;
   thoughtform: string | null;
   embedding: Buffer | null;
+  /**
+   * Embedding model the vector belongs to (the server's configured model when
+   * it was written); null when there is no vector. Vectors from before 3.0
+   * are labelled with the model configured on the first 3.0 start.
+   */
+  embedding_model?: string | null;
   /** JSON-encoded DerivedMap; rows written before 3.0 read back as '{}'. */
   derived?: string;
 }
@@ -24,7 +30,14 @@ export interface ConceptRow {
 export type ConceptUpdateFields = Partial<
   Pick<
     ConceptRow,
-    'version' | 'updated_at' | 'tags' | 'markdown' | 'thoughtform' | 'embedding' | 'derived'
+    | 'version'
+    | 'updated_at'
+    | 'tags'
+    | 'markdown'
+    | 'thoughtform'
+    | 'embedding'
+    | 'embedding_model'
+    | 'derived'
   >
 >;
 
@@ -145,6 +158,31 @@ export interface DatabaseAdapter {
     k: number,
     filter: VectorFilter
   ): VectorResult[] | Promise<VectorResult[]>;
+
+  // --- Embedding models ---
+
+  /**
+   * Vectors in `namespaces` (null: every namespace) not recorded as made by
+   * `model`, including vectors with no recorded model.
+   */
+  countForeignVectors(
+    model: string,
+    namespaces: readonly string[] | null
+  ): number | Promise<number>;
+
+  /** Up to `limit` ids, in id order after `afterId`, of concepts in `namespace` with such a vector. */
+  findForeignVectors(
+    model: string,
+    namespace: string,
+    afterId: string | null,
+    limit: number
+  ): string[] | Promise<string[]>;
+
+  /**
+   * Label vectors stored before 3.0, which carry no model, with `model`.
+   * Runs once per database; returns the number of vectors labelled.
+   */
+  labelLegacyVectors(model: string): number | Promise<number>;
 
   // --- Concept metadata (for search result enrichment) ---
 

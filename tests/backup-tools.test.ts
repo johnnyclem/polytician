@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
-vi.mock('@xenova/transformers', () => {
+vi.mock('@huggingface/transformers', () => {
   const mockPipeline = async (text: string) => {
     const hash = Array.from(text).reduce((acc, c) => acc + c.charCodeAt(0), 0);
     const data = new Float32Array(VECTOR_DIMENSION);

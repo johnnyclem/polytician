@@ -295,6 +295,39 @@ export async function createServer(): Promise<McpServer> {
       })
   );
 
+  server.registerTool(
+    'reembed_concepts',
+    {
+      description:
+        "Re-derive, from each concept's text, the vectors in a namespace that a different embedding model made (for example after POLYTICIAN_EMBEDDING_MODEL changed). search_concepts refuses a namespace holding such vectors (EMBEDDING_MODEL_MISMATCH) until they are re-embedded. Authored vectors are replaced only with overwrite: true; concepts without text are reported and left unchanged. Returns the ids re-embedded, the ones skipped and how many stale vectors remain.",
+      inputSchema: z
+        .object({
+          namespace: namespaceArg,
+          overwrite: z
+            .boolean()
+            .optional()
+            .describe('Also replace authored (caller-supplied) vectors (default false)'),
+          limit: z
+            .number()
+            .int()
+            .positive()
+            .max(LIMITS.batchEntries)
+            .optional()
+            .describe(`Most concepts to re-embed in this call (default ${LIMITS.batchEntries})`),
+        })
+        .strict(),
+    },
+    async ({ namespace, overwrite, limit }) =>
+      runTool('reembed_concepts', async () => {
+        const result = await conceptService.reembed({
+          namespace: resolveNamespace(namespace),
+          overwrite,
+          limit,
+        });
+        return jsonResult(result);
+      })
+  );
+
   // --- Health & Diagnostics ---
 
   server.registerTool(

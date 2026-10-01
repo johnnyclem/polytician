@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
-// Mock @xenova/transformers
-vi.mock('@xenova/transformers', () => {
+// Mock @huggingface/transformers
+vi.mock('@huggingface/transformers', () => {
   const mockPipeline = async (text: string, _options?: Record<string, unknown>) => {
     const hash = Array.from(text).reduce((acc, c) => acc + c.charCodeAt(0), 0);
     const data = new Float32Array(VECTOR_DIMENSION);
@@ -231,7 +231,7 @@ describe('Batch embedding ingestion', () => {
   });
 });
 
-describe('Async sidecar communication', () => {
+describe('Concurrent embedding requests', () => {
   let embeddingService: InstanceType<typeof EmbeddingService>;
 
   beforeEach(() => {

@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import pg from 'pg';
 import { initializeDatabaseAsync, closeDatabase, resetAdapter } from '../src/db/client.js';
-import { resetConfig } from '../src/config.js';
+import { getConfig, resetConfig } from '../src/config.js';
 import { ConceptService } from '../src/services/concept.service.js';
 import { VersionConflictError } from '../src/errors/index.js';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
@@ -105,6 +105,26 @@ describe.skipIf(!PG_URL)('PostgresAdapter (pgvector)', () => {
     expect(results[0]!.score).toBeCloseTo(1, 5);
     const read = await service.read(id);
     expect(read.derived).toEqual({});
+    // 2.x recorded no model; its vectors are labelled with the configured one.
+    const labelled = await admin.query<{ embedding_model: string }>(
+      'SELECT embedding_model FROM concepts WHERE id = $1',
+      [id]
+    );
+    expect(labelled.rows[0]!.embedding_model).toBe(getConfig().embeddingModel);
+  });
+
+  // --- POLY-27 ---
+
+  it('refuses to rank vectors from another embedding model', async () => {
+    await open();
+    await service.save({ embedding: vec(6), namespace: 'default' });
+    getConfig().embeddingModel = 'Xenova/paraphrase-MiniLM-L3-v2';
+    await expect(service.search(vec(6), 5)).rejects.toMatchObject({
+      code: 'EMBEDDING_MODEL_MISMATCH',
+    });
+    await expect(service.search(vec(6), 5, undefined, { namespace: 'other' })).resolves.toEqual(
+      []
+    );
   });
 
   // --- POLY-02 on a real multi-connection backend ---

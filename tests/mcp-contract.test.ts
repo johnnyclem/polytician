@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
 
 // Deterministic stand-in for the MiniLM pipeline: texts sharing words get similar vectors.
-vi.mock('@xenova/transformers', () => {
+vi.mock('@huggingface/transformers', () => {
   const mockPipeline = async (text: string, _options?: Record<string, unknown>) => {
     const data = new Float32Array(VECTOR_DIMENSION);
     for (const word of text.toLowerCase().split(/\W+/).filter(Boolean)) {

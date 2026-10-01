@@ -158,7 +158,8 @@ describe('agentvault-sync backup & restore round-trip', () => {
     expect(run(`restore --file ${backupPath}`, { POLYTICIAN_BACKUP_KEY: key })).toContain(
       'imported 3 concepts'
     );
-  });
+    // Six CLI processes in a row: allow for a loaded machine.
+  }, 30_000);
 
   it('should fail restore without --file flag', () => {
     expect(runFailing('restore')).toContain('--file <path> is required');

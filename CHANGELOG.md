@@ -47,10 +47,16 @@ Upgrade notes for every breaking change are in [MIGRATION.md](MIGRATION.md).
   - `runBackup` rejects a ThoughtForm whose `metadata.contentHash` does not equal `computeContentHash()` of its content (exit 2), and the dedupe key covers each ThoughtForm's id, `updatedAtMs` and content hash. In 2.x an edit with a stale producer hash was reported as a `duplicate` and never backed up.
   - Rebase is driven by commit order: `rebase()` takes `remoteCommits` (`{ commitId, createdAtMs, thoughtforms }`) and `lastApplied` (a commit cursor) instead of `remoteForms`, `localBaseUpdatedAtMs` and `observedRemoteMaxUpdatedAtMs`, and `runRebase` reads remote commits and stores `lastApplied` in its state file. `computeSkewSafeLowerBound` is removed. In 2.x the delta was filtered by producer timestamps, so edits from a device that synced late were silently dropped.
   - `resolveConflict` treats two ThoughtForms as identical only if their content is equal, not just their `contentHash`.
-- **Library API (`ConceptService`, `DatabaseAdapter`)**: `search()` results carry `score`. `search()` options take `namespaces: string[] | '*'` instead of `crossNamespace`. `read()`/`delete()` take `{ namespace }`. `save()` takes `autoEmbed`/`derived`/`overwrite`. Adapters implement `applyWrites()`, and `vectorSearch(query, k, filter)`/`upsertVector(id, namespace, embedding)` changed signature. `SummarizeOptions.neighborDistances` became `neighborScores`.
+- **Node.js 22 or newer.** `engines.node` is `>=22` (Node 20 reached end of life in April 2026); CI runs Node 22 and 24, and the Docker image uses `node:22-bookworm-slim`.
+- **`@xenova/transformers` is replaced by `@huggingface/transformers` 4.x.** 2.x pulled in a critical protobufjs advisory (via onnxruntime-web) and vulnerable sharp/libvips builds; `npm audit --omit=dev --audit-level=high` is now clean. The default model (`Xenova/all-MiniLM-L6-v2`, quantized `q8`) is unchanged. `POLYTICIAN_EMBEDDING_MODEL` must name a model `@huggingface/transformers` can load.
+- **An embedding model must produce 384-dimensional vectors.** 2.x silently truncated a larger model's output to 384 components; 3.0 fails the embedding with an error naming both sizes.
+- **Each vector records its embedding model, and search refuses to mix models.** `concepts.embedding_model` holds the configured model when the vector was written. A search over namespaces holding vectors from another model fails with `EMBEDDING_MODEL_MISMATCH` (in 2.x, changing `POLYTICIAN_EMBEDDING_MODEL` silently produced meaningless rankings); the new `reembed_concepts` tool re-derives them. Vectors from 2.x are labelled with the model configured on the first 3.0 start.
+- **Library API (`ConceptService`, `DatabaseAdapter`)**: `search()` results carry `score`. `search()` options take `namespaces: string[] | '*'` instead of `crossNamespace`. `read()`/`delete()` take `{ namespace }`. `save()` takes `autoEmbed`/`derived`/`overwrite`. Adapters implement `applyWrites()`, `countForeignVectors()`, `findForeignVectors()` and `labelLegacyVectors()`, rows carry `embedding_model`, and `vectorSearch(query, k, filter)`/`upsertVector(id, namespace, embedding)` changed signature. `SummarizeOptions.neighborDistances` became `neighborScores`.
 
 ### Added
 
+- `reembed_concepts { namespace?, overwrite?, limit? }` and `ConceptService.reembed()`: re-derive the vectors another embedding model made.
+- `EMBEDDING_MODEL_MISMATCH` error code.
 - `ConceptService.restore(records, { onConflict })`: writes backup records with their ids, namespaces, timestamps, vectors and provenance in one transaction.
 - `CONFIG_ERROR` error code for calls that need configuration the server lacks (such as a backup key).
 - `--config <path>` command-line option.
@@ -63,6 +69,7 @@ Upgrade notes for every breaking change are in [MIGRATION.md](MIGRATION.md).
 
 ### Fixed
 
+- A failed embedding-model load (for example the first download while offline) is retried on the next call instead of failing every embedding until restart.
 - A backup can be restored: in 2.x the only persisted backups (auto-backups) stored tags and thoughtforms as JSON strings and no vectors, so a restore corrupted tags (a later tag merge produced `["[", "\"", ...]`), double-encoded thoughtforms and left nothing searchable.
 - Namespace- and tag-filtered search no longer post-filters a global top-k. The filters run inside the KNN query: the vec0 namespace partition key and a candidate-id constraint on sqlite-vec, SQL `WHERE` with HNSW iterative scan (or exact scan on pgvector < 0.8) on Postgres. A crowded namespace can no longer hide another namespace's matches.
 - Saving is atomic: the concept row and its vector are written in one transaction on both backends. A failed vector write no longer leaves a concept that reports a vector but is never found.
@@ -76,3 +83,4 @@ Upgrade notes for every breaking change are in [MIGRATION.md](MIGRATION.md).
 
 - SQLite: the `concept_vectors` vec0 table is rebuilt from `concepts.embedding` with a `namespace` partition key and cosine distance. A `derived` column is added. Stored embeddings that could never be searched (wrong length, non-finite or all zero, e.g. left behind by a failed 2.x save) are cleared.
 - Postgres: the same repair, plus the IVFFlat → HNSW index change, recorded as `schema_version = 3` in `metadata`.
+- Both: a `concepts.embedding_model` column (with a partial index on `(namespace, embedding_model)`) is added, and existing vectors are labelled once with the configured embedding model (recorded as `legacy_vectors_labelled` in `metadata`).

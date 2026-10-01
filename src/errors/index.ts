@@ -62,3 +62,17 @@ export class OverwriteRefusedError extends PolyticianError {
     );
   }
 }
+
+/**
+ * Stored vectors in the searched namespaces were made by a different
+ * embedding model than the one that embeds queries, so their scores would be
+ * meaningless. reembed_concepts re-derives them.
+ */
+export class EmbeddingModelMismatchError extends PolyticianError {
+  constructor(count: number, model: string, scope: string) {
+    super(
+      `${count} vector(s) in ${scope} were made by a different embedding model than the configured ${model}; ranking them against ${model} queries would be meaningless. Run reembed_concepts for the namespace (or switch POLYTICIAN_EMBEDDING_MODEL back) before searching.`,
+      'EMBEDDING_MODEL_MISMATCH'
+    );
+  }
+}

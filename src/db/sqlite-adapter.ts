@@ -28,8 +28,15 @@ const UPDATABLE_COLUMNS = new Set([
   'markdown',
   'thoughtform',
   'embedding',
+  'embedding_model',
   'derived',
 ]);
+
+/** metadata key recording that pre-3.0 vectors were labelled with a model. */
+const LEGACY_VECTORS_LABELLED = 'legacy_vectors_labelled';
+
+/** Rows whose vector is not recorded as made by the bound model. */
+const FOREIGN_VECTOR = '(embedding_model IS NULL OR embedding_model <> ?)';
 
 /** Thrown inside a transaction to roll it back when a write's precondition fails. */
 class PreconditionFailed extends Error {
@@ -79,6 +86,7 @@ export class SqliteAdapter implements DatabaseAdapter {
         markdown TEXT,
         thoughtform TEXT,
         embedding BLOB,
+        embedding_model TEXT,
         derived TEXT NOT NULL DEFAULT '{}'
       )
     `);
@@ -88,6 +96,7 @@ export class SqliteAdapter implements DatabaseAdapter {
       `namespace TEXT NOT NULL DEFAULT 'default'`,
       `version INTEGER NOT NULL DEFAULT 1`,
       `derived TEXT NOT NULL DEFAULT '{}'`,
+      `embedding_model TEXT`,
     ]) {
       try {
         this.db.exec(`ALTER TABLE concepts ADD COLUMN ${column}`);
@@ -101,6 +110,10 @@ export class SqliteAdapter implements DatabaseAdapter {
     `);
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_concepts_namespace ON concepts(namespace, updated_at)
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_concepts_vector_model
+        ON concepts(namespace, embedding_model) WHERE embedding IS NOT NULL
     `);
 
     this.db.exec(`
@@ -145,7 +158,9 @@ export class SqliteAdapter implements DatabaseAdapter {
       const rows = this.db
         .prepare('SELECT id, namespace, embedding FROM concepts WHERE embedding IS NOT NULL')
         .all() as Array<{ id: string; namespace: string; embedding: Buffer }>;
-      const clear = this.db.prepare('UPDATE concepts SET embedding = NULL WHERE id = ?');
+      const clear = this.db.prepare(
+        'UPDATE concepts SET embedding = NULL, embedding_model = NULL WHERE id = ?'
+      );
       for (const row of rows) {
         const usable =
           row.embedding.byteLength === VECTOR_DIMENSION * 4 &&
@@ -164,7 +179,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     return (
       (this.db
         .prepare(
-          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived FROM concepts WHERE id = ?'
+          'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived FROM concepts WHERE id = ?'
         )
         .get(id) as ConceptRow | undefined) ?? null
     );
@@ -192,8 +207,8 @@ export class SqliteAdapter implements DatabaseAdapter {
         const { row } = write;
         const inserted = this.db
           .prepare(
-            `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+            `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
           )
           .run(
             row.id,
@@ -205,6 +220,7 @@ export class SqliteAdapter implements DatabaseAdapter {
             row.markdown,
             row.thoughtform,
             row.embedding,
+            row.embedding ? (row.embedding_model ?? null) : null,
             row.derived ?? '{}'
           );
         if (inserted.changes === 0) return false;
@@ -250,8 +266,8 @@ export class SqliteAdapter implements DatabaseAdapter {
   insertConcept(row: ConceptRow): void {
     this.db
       .prepare(
-        `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         row.id,
@@ -263,6 +279,7 @@ export class SqliteAdapter implements DatabaseAdapter {
         row.markdown,
         row.thoughtform,
         row.embedding,
+        row.embedding ? (row.embedding_model ?? null) : null,
         row.derived ?? '{}'
       );
   }
@@ -347,6 +364,46 @@ export class SqliteAdapter implements DatabaseAdapter {
         `SELECT concept_id, distance FROM concept_vectors WHERE ${conditions.join(' AND ')} ORDER BY distance`
       )
       .all(...params) as VectorResult[];
+  }
+
+  countForeignVectors(model: string, namespaces: readonly string[] | null): number {
+    if (namespaces !== null && namespaces.length === 0) return 0;
+    const nsClause =
+      namespaces === null ? '' : ` AND namespace IN (${namespaces.map(() => '?').join(', ')})`;
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM concepts WHERE embedding IS NOT NULL AND ${FOREIGN_VECTOR}${nsClause}`
+      )
+      .get(model, ...(namespaces ?? [])) as { count: number };
+    return row.count;
+  }
+
+  findForeignVectors(
+    model: string,
+    namespace: string,
+    afterId: string | null,
+    limit: number
+  ): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM concepts WHERE embedding IS NOT NULL AND namespace = ? AND ${FOREIGN_VECTOR}
+         AND id > ? ORDER BY id LIMIT ?`
+      )
+      .all(namespace, model, afterId ?? '', limit) as Array<{ id: string }>;
+    return rows.map(r => r.id);
+  }
+
+  labelLegacyVectors(model: string): number {
+    return this.db.transaction((): number => {
+      if (this.getMetadata(LEGACY_VECTORS_LABELLED) !== null) return 0;
+      const labelled = this.db
+        .prepare(
+          'UPDATE concepts SET embedding_model = ? WHERE embedding IS NOT NULL AND embedding_model IS NULL'
+        )
+        .run(model).changes;
+      this.setMetadata(LEGACY_VECTORS_LABELLED, model);
+      return labelled;
+    })();
   }
 
   findConceptMeta(ids: string[]): ConceptMetaRow[] {

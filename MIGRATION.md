@@ -4,6 +4,7 @@ This guide covers every breaking change in 3.0 and what to do about it. The full
 
 ## Before you upgrade
 
+- **Node.js 22 or newer** is required (`engines.node: ">=22"`). Install with scripts enabled (no `--ignore-scripts`): better-sqlite3, sharp and onnxruntime-node fetch or build native binaries at install time. `ONNXRUNTIME_NODE_INSTALL=skip` skips onnxruntime-node's CUDA download on Linux x64, which polytician does not use.
 - **Back up the database** (`~/.polytician/concepts.db`, or a `pg_dump` of the Postgres database). The first 3.0 start migrates the schema in place, and 2.x cannot read the migrated vector index. Copy the file (or dump the database): 3.0 cannot import 2.x backup files (see "Backups" below), so a 2.x backup is only restorable with 2.x.
 - **Postgres:** make sure pgvector is at least 0.5 (HNSW); 0.8 or newer is recommended. Check with `SELECT extversion FROM pg_extension WHERE extname = 'vector';`.
 
@@ -13,6 +14,8 @@ This guide covers every breaking change in 3.0 and what to do about it. The full
 |---|---|
 | SQLite | Rebuilds `concept_vectors` from `concepts.embedding` with a `namespace` partition key and `distance_metric=cosine`, and adds the `concepts.derived` column. |
 | Postgres | Under an advisory lock: adds `concepts.derived`, drops `idx_concept_vectors_embedding` (IVFFlat, L2) and creates `idx_concept_vectors_embedding_cosine` (HNSW, `vector_cosine_ops`). Re-indexes rows whose vector was missing and records `schema_version = 3` in `metadata`. |
+
+Both backends also add `concepts.embedding_model` and label every existing vector, once, with the configured `POLYTICIAN_EMBEDDING_MODEL` (2.x recorded no model). **If you changed `POLYTICIAN_EMBEDDING_MODEL` in 2.x,** start 3.0 the first time with the model your vectors were made with, then change it and run `reembed_concepts` per namespace.
 
 On both backends, stored embeddings that could never be searched are set to `NULL`: wrong byte length (left by a failed, non-atomic 2.x save), non-finite, or all zero. The concept keeps its markdown and thoughtform. Re-embed it with `convert_concept { from: "markdown", to: "vector" }`, or re-save it.
 
@@ -80,9 +83,13 @@ A `save_concept` create must include at least one of `markdown`, `thoughtform` o
 - `vault_restore` is gone. Put the backup file in `<dataDir>/backups` and call `import_backup { file: "<name>" }`. Inline bundles and arbitrary paths are no longer accepted.
 - `import_backup` keeps a local concept that is as new as or newer than the backup copy (`onConflict: "newer"`), where `vault_restore` overwrote it. Pass `onConflict: "overwrite"` to restore over newer local edits.
 
+### Embedding model changes
+
+A search over a namespace holding vectors made by another embedding model fails with `EMBEDDING_MODEL_MISMATCH`. Run `reembed_concepts { namespace }` (repeat while `remaining` > 0; add `overwrite: true` to also replace vectors your client supplied, and re-save or delete concepts reported as `no-text`).
+
 ### Error bodies
 
-Service errors are returned as `{ "error": "...", "code": "..." }` (with `isError: true`). Branch on `code` (`NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT`, `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR`), not on message text.
+Service errors are returned as `{ "error": "...", "code": "..." }` (with `isError: true`). Branch on `code` (`NOT_FOUND`, `VALIDATION_ERROR`, `VERSION_CONFLICT`, `NAMESPACE_DENIED`, `OVERWRITE_REFUSED`, `CONVERSION_ERROR`, `EMBEDDING_MODEL_MISMATCH`, `CONFIG_ERROR`), not on message text.
 
 ## Operators
 
@@ -116,6 +123,7 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 - `save()` accepts `autoEmbed` (default `false` at the service level), `derived` and `overwrite`, and throws `ValidationError`, `NamespaceDeniedError` and `OverwriteRefusedError` in addition to `VersionConflictError`. `saveBatch(entries, { autoEmbed, batchSize })` is atomic.
 - Custom `DatabaseAdapter` implementations must add `applyWrites(writes)`, which applies inserts, conditional updates (`WHERE version = expectedVersion`) and deletes atomically, keeping the vector index in step. They must also accept `vectorSearch(query, k, { namespaces, tags })` with the filters applied inside the KNN query and `distance` as cosine distance, and `upsertVector(id, namespace, embedding)`.
 - `IndexSyncService` only keeps `rebuildAfterDeserialize()`; `start()`, `stop()`, `waitForPending()` and `pendingCount` were removed.
+- Custom `DatabaseAdapter` implementations must also store `embedding_model` with each vector and implement `countForeignVectors(model, namespaces)`, `findForeignVectors(model, namespace, afterId, limit)` and `labelLegacyVectors(model)`.
 - `SummarizeOptions.neighborDistances` is now `neighborScores`, with the same `[0, 1]` scores as search.
 - `encryptBundle` and `decryptBundle` (`src/storage/thoughtform.ts`) were removed; they returned their input unchanged. Backup encryption lives in `src/backup/format.ts`.
 - `BackupService.runBackup()` writes the JSONL format and returns the file path; `exportBackup`, `importBackup` and `importBackupBytes` in `src/services/backup.service.ts` are the export/import entry points.

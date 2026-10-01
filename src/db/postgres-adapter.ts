@@ -33,8 +33,12 @@ const UPDATABLE_COLUMNS = new Set([
   'markdown',
   'thoughtform',
   'embedding',
+  'embedding_model',
   'derived',
 ]);
+
+/** metadata key recording that pre-3.0 vectors were labelled with a model. */
+const LEGACY_VECTORS_LABELLED = 'legacy_vectors_labelled';
 
 /** pgvector text literal for a Float32 embedding buffer. */
 function toPgVector(embedding: Buffer): string {
@@ -80,6 +84,7 @@ export class PostgresAdapter implements DatabaseAdapter {
           markdown TEXT,
           thoughtform TEXT,
           embedding BYTEA,
+          embedding_model TEXT,
           derived TEXT NOT NULL DEFAULT '{}'
         )
       `);
@@ -89,11 +94,16 @@ export class PostgresAdapter implements DatabaseAdapter {
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
         ALTER TABLE concepts ADD COLUMN IF NOT EXISTS derived TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE concepts ADD COLUMN IF NOT EXISTS embedding_model TEXT;
       `);
 
       await client.query(`CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at)`);
       await client.query(
         `CREATE INDEX IF NOT EXISTS idx_concepts_namespace ON concepts(namespace, updated_at)`
+      );
+      await client.query(
+        `CREATE INDEX IF NOT EXISTS idx_concepts_vector_model
+           ON concepts(namespace, embedding_model) WHERE embedding IS NOT NULL`
       );
 
       await client.query(`
@@ -162,7 +172,10 @@ export class PostgresAdapter implements DatabaseAdapter {
         embeddingProblem(deserializeEmbedding(embedding)) === null;
       if (!usable) {
         // Never searchable (wrong length, non-finite or zero): drop it.
-        await client.query('UPDATE concepts SET embedding = NULL WHERE id = $1', [row.id]);
+        await client.query(
+          'UPDATE concepts SET embedding = NULL, embedding_model = NULL WHERE id = $1',
+          [row.id]
+        );
         await client.query('DELETE FROM concept_vectors WHERE concept_id = $1', [row.id]);
       } else if (!row.indexed) {
         await this.upsertVectorWith(client, row.id, embedding);
@@ -192,7 +205,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async findConcept(id: string): Promise<ConceptRow | null> {
     const result = await this.pool.query(
-      'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived FROM concepts WHERE id = $1',
+      'SELECT id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived FROM concepts WHERE id = $1',
       [id]
     );
     if (result.rows.length === 0) return null;
@@ -225,8 +238,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       case 'insert': {
         const { row } = write;
         const inserted = await client.query(
-          `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING`,
           [
             row.id,
             row.namespace,
@@ -237,6 +250,7 @@ export class PostgresAdapter implements DatabaseAdapter {
             row.markdown,
             row.thoughtform,
             row.embedding,
+            row.embedding ? (row.embedding_model ?? null) : null,
             row.derived ?? '{}',
           ]
         );
@@ -287,8 +301,8 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async insertConcept(row: ConceptRow): Promise<void> {
     await this.pool.query(
-      `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, derived)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      `INSERT INTO concepts (id, namespace, version, created_at, updated_at, tags, markdown, thoughtform, embedding, embedding_model, derived)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         row.id,
         row.namespace,
@@ -299,6 +313,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         row.markdown,
         row.thoughtform,
         row.embedding,
+        row.embedding ? (row.embedding_model ?? null) : null,
         row.derived ?? '{}',
       ]
     );
@@ -441,6 +456,52 @@ export class PostgresAdapter implements DatabaseAdapter {
     }));
   }
 
+  async countForeignVectors(model: string, namespaces: readonly string[] | null): Promise<number> {
+    if (namespaces !== null && namespaces.length === 0) return 0;
+    const result = await this.pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM concepts
+       WHERE embedding IS NOT NULL AND embedding_model IS DISTINCT FROM $1
+       ${namespaces === null ? '' : 'AND namespace = ANY($2::text[])'}`,
+      namespaces === null ? [model] : [model, [...namespaces]]
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async findForeignVectors(
+    model: string,
+    namespace: string,
+    afterId: string | null,
+    limit: number
+  ): Promise<string[]> {
+    const result = await this.pool.query<{ id: string }>(
+      `SELECT id FROM concepts
+       WHERE embedding IS NOT NULL AND namespace = $1 AND embedding_model IS DISTINCT FROM $2
+         AND id > $3
+       ORDER BY id LIMIT $4`,
+      [namespace, model, afterId ?? '', limit]
+    );
+    return result.rows.map(r => r.id);
+  }
+
+  async labelLegacyVectors(model: string): Promise<number> {
+    return this.withTransaction(async client => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_KEY]);
+      const done = await client.query('SELECT 1 FROM metadata WHERE key = $1', [
+        LEGACY_VECTORS_LABELLED,
+      ]);
+      if ((done.rowCount ?? 0) > 0) return 0;
+      const labelled = await client.query(
+        'UPDATE concepts SET embedding_model = $1 WHERE embedding IS NOT NULL AND embedding_model IS NULL',
+        [model]
+      );
+      await client.query('INSERT INTO metadata (key, value) VALUES ($1, $2)', [
+        LEGACY_VECTORS_LABELLED,
+        model,
+      ]);
+      return labelled.rowCount ?? 0;
+    });
+  }
+
   async findConceptMeta(ids: string[]): Promise<ConceptMetaRow[]> {
     if (ids.length === 0) return [];
     const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
@@ -523,6 +584,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       markdown: (row.markdown as string) ?? null,
       thoughtform: (row.thoughtform as string) ?? null,
       embedding: row.embedding ? Buffer.from(row.embedding as Buffer) : null,
+      embedding_model: (row.embedding_model as string | null) ?? null,
       derived: (row.derived as string) ?? '{}',
     };
   }
