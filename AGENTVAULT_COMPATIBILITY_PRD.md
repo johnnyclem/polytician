@@ -234,6 +234,8 @@ export function parsePolyticianConfig(sourcePath: string, verbose?: boolean): Po
 export function findPolyticianConfigs(sourcePath: string): string[]
 ```
 
+> **Polytician 3.0:** the server no longer reads `.polytician.json` from its working directory (an opened project is not trusted). Its configuration is `~/.polytician/config.json`, `--config <path>`, or environment variables. A `.polytician.json` in a project directory can still serve as a packaging marker for detection, but it does not configure the server.
+
 **Detection heuristic:**
 1. `.polytician.json` exists in directory
 2. `package.json` has `polytician` in dependencies

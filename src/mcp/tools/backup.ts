@@ -1,23 +1,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { getConfig } from '../../config.js';
-import { NamespaceDeniedError } from '../../errors/index.js';
-import { resolveNamespace } from '../../services/namespace-policy.js';
+import { isNamespaceAllowed, resolveNamespace } from '../../services/namespace-policy.js';
 import { exportBackup, importBackup } from '../../services/backup.service.js';
 import { backupsDir, listBackupFiles } from '../../backup/files.js';
 import { NamespaceSchema } from '../../types/concept.js';
 import { jsonResult, runTool } from '../tool-result.js';
-
-/** Whether the operator's POLYTICIAN_NAMESPACES allowlist lets tool calls address `namespace`. */
-function namespaceAllowed(namespace: string): boolean {
-  try {
-    resolveNamespace(namespace);
-    return true;
-  } catch (err) {
-    if (err instanceof NamespaceDeniedError) return false;
-    throw err;
-  }
-}
 
 /**
  * Registers export_backup, import_backup and list_backups. Backups are files
@@ -92,7 +80,7 @@ export function registerBackupTools(server: McpServer): void {
           namespace: namespace !== undefined ? resolveNamespace(namespace) : undefined,
           onConflict,
           reembed,
-          allowNamespace: namespaceAllowed,
+          allowNamespace: isNamespaceAllowed,
         });
         return jsonResult(result);
       })

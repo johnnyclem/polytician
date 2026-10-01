@@ -3,11 +3,13 @@ import { z } from 'zod';
 import type { AgentVaultConfig } from '../config.js';
 import { InferenceClient } from '../client/inference-client.js';
 import { MemoryRepoClient } from '../client/memory-repo-client.js';
-import { ArweaveUploadClient } from '../client/arweave-client.js';
 import { SecretClient } from '../client/secret-client.js';
+import { applyPulledEntries } from '../connectors/memory-sync.connector.js';
+import { sharedArchivalConnector } from '../connectors/archival.connector.js';
 import { conceptService } from '../../../services/concept.service.js';
 import { embeddingService } from '../../../services/embedding.service.js';
-import { resolveNamespace } from '../../../services/namespace-policy.js';
+import { isNamespaceAllowed, resolveNamespace } from '../../../services/namespace-policy.js';
+import { ValidationError } from '../../../errors/index.js';
 import { NamespaceSchema, TagsSchema } from '../../../types/concept.js';
 import { LIMITS } from '../../../types/limits.js';
 import { errorPayload } from '../../../mcp/tool-result.js';
@@ -30,7 +32,6 @@ function toolError(err: unknown): {
 export function registerVaultTools(server: McpServer, config: AgentVaultConfig): void {
   const inferClient = new InferenceClient(config);
   const memClient = new MemoryRepoClient(config);
-  const arweaveClient = new ArweaveUploadClient(config);
   const secretClient = new SecretClient(config);
 
   // --- vault_infer ---
@@ -124,6 +125,13 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
         const concept = await conceptService.read(conceptId, undefined, {
           namespace: resolveNamespace(namespace),
         });
+        // Namespace and updatedAt let a later pull place the entry and order it (last write wins).
+        const metadata = {
+          conceptId,
+          namespace: concept.namespace,
+          version: concept.version,
+          updatedAt: concept.updatedAt,
+        };
         const entries = [];
         if (concept.markdown) {
           entries.push({
@@ -131,7 +139,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
             contentType: 'markdown' as const,
             data: concept.markdown,
             tags: concept.tags ?? [],
-            metadata: { conceptId, updatedAt: concept.updatedAt },
+            metadata,
           });
         }
         if (concept.thoughtform) {
@@ -140,7 +148,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
             contentType: 'json' as const,
             data: JSON.stringify(concept.thoughtform),
             tags: concept.tags ?? [],
-            metadata: { conceptId, updatedAt: concept.updatedAt },
+            metadata,
           });
         }
         const commit = await memClient.commit(`polytician: manual push ${conceptId}`, entries);
@@ -161,33 +169,17 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
     'vault_memory_pull',
     {
       description:
-        "Pull all entries from AgentVault's memory_repo branch into Polytician concepts in one namespace. Entries whose concept lives in another namespace are skipped.",
+        "Pull markdown entries from AgentVault's memory_repo branch into concepts in one namespace, last write wins: an entry replaces a local concept only when its updatedAt is newer, entries recorded for another namespace (or whose id lives in another namespace) are skipped, and ids must be UUIDs. Skipped entries are reported with a reason.",
       inputSchema: z.object({ namespace: namespaceArg }).strict(),
     },
     async ({ namespace }) => {
       try {
         const ns = resolveNamespace(namespace);
         const branch = await memClient.getBranchState();
-        let imported = 0;
-        const skipped: Array<{ id: string; error: string }> = [];
-        const mdEntries = branch.entries.filter(
-          e => e.key.startsWith('concepts/') && e.key.endsWith('/markdown')
-        );
-        for (const entry of mdEntries) {
-          const cid = entry.key.split('/')[1];
-          if (!cid) continue;
-          try {
-            await conceptService.save({
-              id: cid,
-              namespace: ns,
-              markdown: entry.data,
-              tags: entry.tags,
-            });
-            imported++;
-          } catch (err) {
-            skipped.push({ id: cid, error: String(errorPayload(err).error) });
-          }
-        }
+        const report = await applyPulledEntries(branch.entries, {
+          namespace: ns,
+          allowNamespace: isNamespaceAllowed,
+        });
         return {
           content: [
             {
@@ -196,8 +188,8 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
                 pulled: true,
                 branch: branch.branch,
                 headSha: branch.headSha,
-                imported,
-                skipped: skipped.length > 0 ? skipped : undefined,
+                imported: report.imported.length,
+                skipped: report.skipped.length > 0 ? report.skipped : undefined,
               }),
             },
           ],
@@ -210,64 +202,59 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
 
   // --- vault_archive_concept ---
 
-  server.registerTool(
-    'vault_archive_concept',
-    {
-      description:
-        'Archive a concept to Arweave permanently via AgentVault. Returns the Arweave transaction ID and URL.',
-      inputSchema: z
-        .object({
-          conceptId: z.string().uuid().describe('Concept UUID to archive'),
-          namespace: namespaceArg,
-        })
-        .strict(),
-    },
-    async ({ conceptId, namespace }) => {
-      try {
-        const concept = await conceptService.read(conceptId, undefined, {
-          namespace: resolveNamespace(namespace),
-        });
-        const content = concept.markdown ?? JSON.stringify(concept.thoughtform);
-        if (!content) {
+  // Only with archival enabled: the operator chose the tag filter and has a
+  // backup key and an Arweave wallet configured.
+  if (config.archival.enabled) {
+    const archival = sharedArchivalConnector(config);
+    server.registerTool(
+      'vault_archive_concept',
+      {
+        description: `Archive the current version of a concept to Arweave via AgentVault: permanent, public and paid, so it cannot be undone. The content is encrypted with the backup key before upload. Only concepts carrying every archival tag (${config.archival.tagFilter.join(', ')}) can be archived, and each version is archived once. Returns the Arweave transaction ID and URL.`,
+        inputSchema: z
+          .object({
+            conceptId: z.string().uuid().describe('Concept UUID to archive'),
+            namespace: namespaceArg,
+          })
+          .strict(),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      },
+      async ({ conceptId, namespace }) => {
+        try {
+          const outcome = await archival.archive(conceptId, resolveNamespace(namespace));
+          if (!outcome.archived) {
+            const why = {
+              'not-tagged': `the concept does not carry every archival tag (${config.archival.tagFilter.join(', ')})`,
+              'no-content': 'the concept has no markdown or thoughtform to archive',
+              'already-archived': 'this version of the concept is already archived',
+            }[outcome.reason];
+            return toolError(new ValidationError(`Not archived: ${why}`));
+          }
+          const { receipt } = outcome;
           return {
-            isError: true,
             content: [
               {
                 type: 'text' as const,
-                text: JSON.stringify({ error: 'Concept has no archivable content' }),
+                text: JSON.stringify({
+                  archived: true,
+                  encrypted: true,
+                  txId: receipt.txId,
+                  url: receipt.url,
+                  size: receipt.size,
+                }),
               },
             ],
           };
+        } catch (err) {
+          return toolError(err);
         }
-        const receipt = await arweaveClient.upload({
-          content,
-          contentType: concept.markdown ? 'markdown' : 'json',
-          tags: concept.tags ?? [],
-          metadata: {
-            conceptId,
-            namespace: concept.namespace ?? 'default',
-            version: concept.version,
-            archivedAt: Date.now(),
-          },
-        });
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                archived: true,
-                txId: receipt.txId,
-                url: receipt.url,
-                size: receipt.size,
-              }),
-            },
-          ],
-        };
-      } catch (err) {
-        return toolError(err);
       }
-    }
-  );
+    );
+  }
 
   // --- vault_get_secret ---
 

@@ -1,14 +1,22 @@
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { readFileSync, existsSync } from 'node:fs';
-import { parseAgentVaultConfig, type AgentVaultConfig } from './integrations/agent-vault/config.js';
+import {
+  AgentVaultConfigSchema,
+  type AgentVaultConfig,
+} from './integrations/agent-vault/config.js';
 import { ConfigurationError } from './errors/index.js';
 
+/**
+ * LLM used by conversions that generate content. 'agentvault' sends the text
+ * being converted (and neighbouring concepts' text) to AgentVault's
+ * inference chain, so it is only used when chosen explicitly.
+ */
 export interface LLMConfig {
-  provider: 'anthropic' | 'openai' | 'sampling' | 'agentvault' | 'none';
-  model?: string;
-  apiKey?: string;
+  provider: 'agentvault' | 'none';
 }
+
+const LLM_PROVIDERS: readonly LLMConfig['provider'][] = ['none', 'agentvault'];
 
 export interface NLPConfig {
   pipeline: 'rule-based' | 'llm' | 'none';
@@ -65,32 +73,79 @@ const DEFAULT_DATA_DIR = join(homedir(), '.polytician');
 
 let cachedConfig: PolyticianConfig | null = null;
 
-function loadConfigFile(): Partial<PolyticianConfig> & {
+type FileConfig = Partial<PolyticianConfig> & {
   llm?: Partial<LLMConfig>;
   nlp?: Partial<NLPConfig>;
-} {
-  const paths = [join(process.cwd(), '.polytician.json'), join(homedir(), '.polytician.json')];
+};
 
-  for (const path of paths) {
-    if (existsSync(path)) {
-      try {
-        const raw = readFileSync(path, 'utf-8');
-        return JSON.parse(raw) as Partial<PolyticianConfig> & {
-          llm?: Partial<LLMConfig>;
-          nlp?: Partial<NLPConfig>;
-        };
-      } catch {
-        // Ignore parse errors, use defaults
-      }
+/** The default config file. Nothing is read from the working directory. */
+export const DEFAULT_CONFIG_FILE = join(homedir(), '.polytician', 'config.json');
+
+/** `--config <path>` or `--config=<path>` from the command line, if given. */
+function configFlag(): string | null {
+  const argv = process.argv;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--config') {
+      const path = argv[i + 1];
+      if (!path || path.startsWith('--'))
+        throw new ConfigurationError('--config needs a file path');
+      return resolve(path);
     }
+    if (arg?.startsWith('--config=')) return resolve(arg.slice('--config='.length));
   }
-
-  return {};
+  return null;
 }
 
-function resolveEnvVar(value: string | undefined): string | undefined {
-  if (!value) return value;
-  return value.replace(/\$\{(\w+)\}/g, (_, name: string) => process.env[name] ?? '');
+/**
+ * Settings from `--config <path>`, else ~/.polytician/config.json. The
+ * working directory is never consulted: MCP clients start servers with the
+ * opened project as cwd, so a file there is not trusted. A file that exists
+ * but cannot be parsed is an error rather than silently ignored.
+ */
+function loadConfigFile(): FileConfig {
+  const explicit = configFlag();
+  const path = explicit ?? DEFAULT_CONFIG_FILE;
+  if (!existsSync(path)) {
+    if (explicit) throw new ConfigurationError(`Config file not found: ${path}`);
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    throw new ConfigurationError(`Config file ${path} is not valid JSON`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ConfigurationError(`Config file ${path} must hold a JSON object`);
+  }
+  return parsed as FileConfig;
+}
+
+/**
+ * Expand `${NAME}` references in a config-file value. Only POLYTICIAN_*
+ * variables may be referenced, so a config value cannot pull an unrelated
+ * secret (say AWS_SECRET_ACCESS_KEY) out of the environment.
+ */
+export function expandConfigValue(value: string, field: string): string {
+  return value.replace(/\$\{(\w+)\}/g, (_, name: string) => {
+    if (!name.startsWith('POLYTICIAN_')) {
+      throw new ConfigurationError(
+        `${field} references \${${name}}; config values can only reference POLYTICIAN_* environment variables`
+      );
+    }
+    return process.env[name] ?? '';
+  });
+}
+
+function parseLLMProvider(raw: unknown): LLMConfig['provider'] {
+  const value = raw ?? 'none';
+  if (!LLM_PROVIDERS.includes(value as LLMConfig['provider'])) {
+    throw new ConfigurationError(
+      `POLYTICIAN_LLM_PROVIDER (llm.provider) must be one of: ${LLM_PROVIDERS.join(', ')}`
+    );
+  }
+  return value as LLMConfig['provider'];
 }
 
 export function getConfig(): PolyticianConfig {
@@ -105,24 +160,31 @@ export function getConfig(): PolyticianConfig {
     process.env['POLYTICIAN_SIDECAR_URL'] ?? (fileConfig.sidecarUrl as string | undefined) ?? null;
   const distFile = (fileConfig as { distributed?: Partial<DistributedConfig> }).distributed ?? {};
 
-  // AgentVault integration config (optional, sync Zod parse)
-  const rawAv = (fileConfig as Record<string, unknown>).agentVault;
+  // AgentVault integration config (optional). An invalid configuration is an
+  // error: silently dropping it would also drop its egress restrictions.
+  const rawAv = (fileConfig as Record<string, unknown>).agentVault as
+    | Record<string, unknown>
+    | undefined;
   const avApiBase = process.env['POLYTICIAN_AV_API_URL'];
+  const fileToken = typeof rawAv?.['apiToken'] === 'string' ? rawAv['apiToken'] : undefined;
   const avApiToken =
-    resolveEnvVar(process.env['POLYTICIAN_AV_API_TOKEN']) ??
-    resolveEnvVar((rawAv as Record<string, string> | undefined)?.apiToken);
+    process.env['POLYTICIAN_AV_API_TOKEN'] ??
+    (fileToken !== undefined ? expandConfigValue(fileToken, 'agentVault.apiToken') : undefined);
   let agentVaultConfig: AgentVaultConfig | undefined;
   if (rawAv || avApiBase) {
-    try {
-      const merged = {
-        ...((rawAv as Record<string, unknown>) ?? {}),
-        ...(avApiBase ? { apiBaseUrl: avApiBase } : {}),
-        ...(avApiToken ? { apiToken: avApiToken } : {}),
-      };
-      agentVaultConfig = parseAgentVaultConfig(merged) ?? undefined;
-    } catch {
-      // AgentVault config parse failed — continue without it
+    const merged = {
+      ...(rawAv ?? {}),
+      ...(avApiBase ? { apiBaseUrl: avApiBase } : {}),
+      ...(avApiToken ? { apiToken: avApiToken } : {}),
+    };
+    const parsed = AgentVaultConfigSchema.safeParse(merged);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new ConfigurationError(
+        `AgentVault configuration is invalid: ${issue?.path.join('.') || '(root)'}: ${issue?.message ?? 'invalid'}`
+      );
     }
+    agentVaultConfig = parsed.data;
   }
 
   const encryptFlag =
@@ -147,12 +209,9 @@ export function getConfig(): PolyticianConfig {
       fileConfig.embeddingModel ??
       'Xenova/all-MiniLM-L6-v2',
     llm: {
-      provider:
-        (process.env['POLYTICIAN_LLM_PROVIDER'] as LLMConfig['provider']) ??
-        fileConfig.llm?.provider ??
-        'none',
-      model: process.env['POLYTICIAN_LLM_MODEL'] ?? fileConfig.llm?.model,
-      apiKey: resolveEnvVar(process.env['POLYTICIAN_LLM_API_KEY'] ?? fileConfig.llm?.apiKey),
+      provider: parseLLMProvider(
+        process.env['POLYTICIAN_LLM_PROVIDER'] ?? fileConfig.llm?.provider
+      ),
     },
     nlp: {
       pipeline:

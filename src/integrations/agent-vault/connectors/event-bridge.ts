@@ -6,7 +6,7 @@ import {
 } from '../../../events/concept-events.js';
 import type { AgentVaultConfig } from '../config.js';
 import { MemorySyncConnector } from './memory-sync.connector.js';
-import { ArchivalConnector } from './archival.connector.js';
+import { sharedArchivalConnector, type ArchivalConnector } from './archival.connector.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -20,7 +20,7 @@ export class AgentVaultEventBridge {
 
   constructor(config: AgentVaultConfig) {
     this.syncConnector = config.sync.enabled ? new MemorySyncConnector(config) : null;
-    this.archivalConnector = config.archival.enabled ? new ArchivalConnector(config) : null;
+    this.archivalConnector = config.archival.enabled ? sharedArchivalConnector(config) : null;
   }
 
   start(): void {

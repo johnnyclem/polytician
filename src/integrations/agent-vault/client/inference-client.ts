@@ -10,6 +10,7 @@ export class InferenceClient {
   }
 
   async infer(req: AVInferRequest): Promise<AVInferResponse> {
-    return this.http.post<AVInferResponse>('/api/inference', req);
+    // Inference changes nothing on the AgentVault side, so a transient failure can be retried.
+    return this.http.post<AVInferResponse>('/api/inference', req, { retry: true });
   }
 }

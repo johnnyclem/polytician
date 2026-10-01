@@ -11,10 +11,12 @@ export interface ArweaveUploadParams {
 
 export class ArweaveUploadClient {
   private readonly http: AVHttpClient;
+  private readonly timeoutMs: number;
   private jwk: Record<string, unknown> | null = null;
 
   constructor(config: AgentVaultConfig) {
     this.http = new AVHttpClient(config);
+    this.timeoutMs = config.archival.timeoutMs;
   }
 
   withJwk(jwk: Record<string, unknown>): this {
@@ -25,7 +27,7 @@ export class ArweaveUploadClient {
   async upload(params: ArweaveUploadParams): Promise<AVArweaveReceipt> {
     if (!this.jwk) {
       throw new Error(
-        'Arweave JWK wallet not configured. Set AGENTVAULT_ARWEAVE_JWK env var or call withJwk().'
+        'Arweave JWK wallet not configured. Set agentVault.archival.arweaveJwk in the config file.'
       );
     }
 
@@ -36,11 +38,17 @@ export class ArweaveUploadClient {
       tagRecord[`tag-${tag}`] = 'true';
     }
 
-    return this.http.post<AVArweaveReceipt>('/api/archival/upload', {
-      data: params.content,
-      tags: tagRecord,
-      metadata: params.metadata,
-      jwk: this.jwk,
-    });
+    // Sent once: an upload is never retried (see AVHttpClient), so the wallet
+    // travels with exactly one request and a timeout never mints a second copy.
+    return this.http.post<AVArweaveReceipt>(
+      '/api/archival/upload',
+      {
+        data: params.content,
+        tags: tagRecord,
+        metadata: params.metadata,
+        jwk: this.jwk,
+      },
+      { timeoutMs: this.timeoutMs }
+    );
   }
 }

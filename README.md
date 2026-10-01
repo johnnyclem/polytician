@@ -17,7 +17,7 @@ Everything runs on your machine. Embeddings are generated in-process; there's no
 - 🔍 **Semantic search** — cosine similarity search over `sqlite-vec` (default) or Postgres/`pgvector`. Namespace and tag filters run inside the vector query, so a filtered top-k is the top-k of the matching concepts. Saved text is embedded automatically, so `save_concept` → `search_concepts` works without a manual conversion
 - 🔒 **Local-first embeddings** — `@xenova/transformers` runs `all-MiniLM-L6-v2` in-process (384 dimensions); no network round-trip, no API key required
 - 🗂️ **Namespaces + optimistic concurrency** — every tool call is scoped to a namespace, and an operator allowlist (`POLYTICIAN_NAMESPACES`) limits which ones a server serves (see [Namespaces](#namespaces) for exactly what that does and does not isolate). `expectedVersion` is checked in the same statement that writes, so of two concurrent writers holding the same version exactly one succeeds
-- 🔌 **Pluggable LLM + NLP** — bring your own provider (Anthropic, OpenAI, MCP sampling, or [AgentVault](#agentvault-integration)) for the conversions that need one (`markdown→thoughtform`, `vector→markdown`, `vector→thoughtform`)
+- 🔌 **Optional LLM + NLP** — the conversions that generate content (`markdown→thoughtform`, `vector→markdown`, `vector→thoughtform`) use [AgentVault](#agentvault-integration) inference when you opt in with `POLYTICIAN_LLM_PROVIDER=agentvault`, or a rule-based NLP pipeline for `markdown→thoughtform`; nothing leaves the machine unless you configure it to
 - 🧳 **Portable backups** — `export_backup` / `import_backup` write and restore every namespace (vectors, tags, thoughtforms and provenance included) as one versioned JSONL file, optionally AES-256-GCM encrypted, with a checksum that detects truncation and edits
 - 🚀 **Deploys anywhere** — a single Node process (SQLite by default), with first-class Docker Compose and Kubernetes manifests for a distributed, Postgres-backed, multi-node setup
 
@@ -136,7 +136,9 @@ Restart Claude Desktop and look for "polytician" in the MCP servers list.
 
 ## Configuration
 
-Polytician is configured entirely through environment variables (or a `.polytician.json` file in the project root or home directory — env vars win). Everything has a sensible default; you don't need to set anything to get started.
+Polytician is configured through environment variables and, optionally, a JSON config file: `~/.polytician/config.json`, or the file given with `--config <path>`. Env vars win over the file. The working directory is never read: MCP clients start servers with the opened project as their working directory, so a config file there is not trusted. A config file that exists but is not valid JSON, or an invalid `agentVault` block, stops the server with an error instead of being ignored. Everything has a sensible default; you don't need to set anything to get started.
+
+In the config file, string values may reference environment variables as `${NAME}`, but only `POLYTICIAN_*` variables (for example `"apiToken": "${POLYTICIAN_AV_TOKEN}"`).
 
 | Variable | Default | Description |
 |----------|---------|--------------|
@@ -146,8 +148,7 @@ Polytician is configured entirely through environment variables (or a `.polytici
 | `POLYTICIAN_POSTGRES_URL` | — | Connection string, required when `POLYTICIAN_DB_BACKEND=postgres` |
 | `POLYTICIAN_EMBEDDING_MODEL` | `Xenova/all-MiniLM-L6-v2` | Any `@xenova/transformers`-compatible feature-extraction model |
 | `POLYTICIAN_SIDECAR_URL` | — | Base URL of the [Python sidecar](#docker-compose), if running one |
-| `POLYTICIAN_LLM_PROVIDER` | `none` | `anthropic`, `openai`, `sampling`, `agentvault`, or `none` — required for LLM-assisted conversions |
-| `POLYTICIAN_LLM_MODEL` / `POLYTICIAN_LLM_API_KEY` | — | Provider-specific model name / key |
+| `POLYTICIAN_LLM_PROVIDER` | `none` | `agentvault` or `none`. `agentvault` sends the text being converted, and its nearest neighbours' text, to AgentVault's inference chain; it is never enabled implicitly |
 | `POLYTICIAN_NLP_PIPELINE` | `none` | `rule-based`, `llm`, or `none` — used by `markdown→thoughtform` |
 | `POLYTICIAN_NAMESPACES` | unset | Namespaces tool calls may address: a comma-separated list, or `*` for any. Unset allows any namespace but refuses `crossNamespace` search. See [Namespaces](#namespaces) |
 | `POLYTICIAN_NODE_ID` | random | Identifies this node in a distributed/multi-node deployment |
@@ -155,7 +156,7 @@ Polytician is configured entirely through environment variables (or a `.polytici
 | `POLYTICIAN_BACKUP_KEY` / `POLYTICIAN_BACKUP_KEY_FILE` | — / `<dataDir>/backup.key` | The 256-bit backup key (base64 or hex), or a file holding it (must be mode `600`) |
 | `POLYTICIAN_BACKUP_THRESHOLD` | `0` (off) | Write an auto-backup after this many saves |
 | `POLYTICIAN_BACKUP_RETAIN` | `10` | Auto-backups to keep; older ones are deleted |
-| `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` | — | Enable the [AgentVault integration](#agentvault-integration) and its `vault_*` tools |
+| `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` | — | Enable the [AgentVault integration](#agentvault-integration) and its `vault_*` tools. The URL must be `https` (plain `http` only for `localhost`) |
 
 ---
 
@@ -255,8 +256,8 @@ Registered only when `POLYTICIAN_AV_API_URL` / `POLYTICIAN_AV_API_TOKEN` are set
 |---|---|
 | `vault_infer` | Run a prompt through AgentVault's inference fallback chain (Bittensor → Venice → local), optionally saving the result as a concept |
 | `vault_memory_push` | Push a concept's markdown/thoughtform to AgentVault's `memory_repo` canister |
-| `vault_memory_pull` | Pull `concepts/*/markdown` entries from a `memory_repo` branch into local concepts |
-| `vault_archive_concept` | Permanently archive a concept to Arweave, returning a transaction ID/URL |
+| `vault_memory_pull` | Pull `concepts/<uuid>/markdown` entries from a `memory_repo` branch into one namespace, last write wins: an entry replaces a local concept only if its `updatedAt` is newer, entries recorded for another namespace are skipped, and every skipped entry is reported with a reason |
+| `vault_archive_concept` | Only when archival is enabled (see below). Archive a tagged concept to Arweave, encrypted, returning a transaction ID/URL |
 | `vault_get_secret` | Fetch secret **metadata** (name, provider, rotation date, length) — never the raw value |
 | `vault_memory_repo_log` | Inspect the `memory_repo` branch head and entry state |
 
@@ -365,7 +366,21 @@ PolyVault (`src/polyvault/`, `src/commands/polyvault/`) is a separate, chunked b
 
 ## AgentVault Integration
 
-Polytician doubles as a semantic-memory source, on-chain backup target, and inference/secrets provider for [AgentVault](https://github.com/johnnyclem/agentvault)'s orchestrator, via the `vault_*` tools above. See:
+Polytician doubles as a semantic-memory source, on-chain backup target, and inference/secrets provider for [AgentVault](https://github.com/johnnyclem/agentvault)'s orchestrator, via the `vault_*` tools above.
+
+Configuring AgentVault does not by itself send concept content anywhere. Each off-box path is a separate opt-in, and the server logs the endpoint and which paths are on at startup:
+
+| Path | Opt-in | What leaves the machine |
+|---|---|---|
+| LLM conversions | `POLYTICIAN_LLM_PROVIDER=agentvault` | The text being converted and its nearest neighbours' text, to AgentVault inference |
+| Memory sync | `agentVault.sync.enabled` | Markdown and thoughtform of every created or updated concept (push); pulls apply remote entries last-write-wins |
+| Arweave archival | `agentVault.archival.enabled` with a non-empty `tagFilter` and a backup key | Concepts carrying every `tagFilter` tag, encrypted with the backup key. Only the concept id, version and key fingerprint are readable on-chain. Arweave is permanent and public, and each new version is a new paid upload |
+
+Archival refuses to start without a `tagFilter` or without a backup key (see [Backup, Restore & Encryption](#backup-restore--encryption)); there is no plaintext archival. `openArchive()` in `src/integrations/agent-vault/connectors/archival.connector.ts` decrypts a downloaded archive with that key.
+
+Requests that change state on AgentVault (memory commits, tombstones, archival uploads) are sent once and never retried, because a request that timed out may still have been applied: a retry could duplicate a commit or mint a second permanent upload (and resend the wallet). Reads and inference are retried on transient failures.
+
+See also:
 
 - [`AGENTVAULT_COMPATIBILITY_PRD.md`](AGENTVAULT_COMPATIBILITY_PRD.md) — the spec for AgentVault's side of this integration
 - [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md) — the encrypted backup/restore bridge (PolyVault)
@@ -416,7 +431,7 @@ polytician/
 ├── src/
 │   ├── index.ts              # Entry point (stdio MCP server + HTTP health server)
 │   ├── server.ts              # Tool registration
-│   ├── config.ts              # Env-var / .polytician.json configuration
+│   ├── config.ts              # Env vars + ~/.polytician/config.json (or --config)
 │   ├── db/                    # SQLite + Postgres adapters
 │   ├── services/               # concept, conversion, embedding, backup, index-sync
 │   ├── backup/                 # Backup file format (JSONL), key loading, backups directory

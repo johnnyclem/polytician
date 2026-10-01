@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   MarkdownSchema,
@@ -11,6 +11,7 @@ import {
 import { StoredThoughtFormSchema, type StoredThoughtForm } from '../types/thoughtform.js';
 import { ConfigurationError, ValidationError } from '../errors/index.js';
 import type { BackupKey } from './key.js';
+import { CIPHER_NAME, newNonce, openBytes, sealBytes } from './seal.js';
 
 /**
  * Polytician backup file, format version 1 (JSONL, UTF-8, one JSON object per line).
@@ -33,10 +34,7 @@ import type { BackupKey } from './key.js';
 
 export const BACKUP_FORMAT = 'polytician-backup';
 export const BACKUP_FORMAT_VERSION = 1;
-export const BACKUP_CIPHER = 'AES-256-GCM';
-
-const NONCE_BYTES = 12;
-const TAG_BYTES = 16;
+export const BACKUP_CIPHER = CIPHER_NAME;
 
 const EncryptionSchema = z
   .object({
@@ -145,7 +143,7 @@ export function encodeBackup(input: EncodeInput): {
   footer: BackupFooter;
 } {
   const backupId = randomUUID();
-  const nonce = input.key ? randomBytes(NONCE_BYTES) : null;
+  const nonce = input.key ? newNonce() : null;
   const header: BackupHeader = {
     type: 'header',
     format: BACKUP_FORMAT,
@@ -182,9 +180,7 @@ export function encodeBackup(input: EncodeInput): {
     return { bytes: Buffer.from(headerLine + body, 'utf-8'), header, footer };
   }
 
-  const cipher = createCipheriv('aes-256-gcm', input.key.key, nonce);
-  cipher.setAAD(Buffer.from(header.encryption.aad, 'utf-8'));
-  const sealed = Buffer.concat([cipher.update(body, 'utf-8'), cipher.final(), cipher.getAuthTag()]);
+  const sealed = sealBytes(Buffer.from(body, 'utf-8'), input.key.key, nonce, header.encryption.aad);
   return {
     bytes: Buffer.from(headerLine + sealed.toString('base64') + '\n', 'utf-8'),
     header,
@@ -265,17 +261,13 @@ export function decodeBackup(bytes: Buffer, getKey: () => BackupKey | null): Dec
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(sealedLine)) {
       throw new BackupFormatError('Encrypted backup body is not base64');
     }
-    const sealed = Buffer.from(sealedLine, 'base64');
-    if (sealed.length < TAG_BYTES)
-      throw new BackupFormatError('Encrypted backup body is truncated');
     try {
-      const decipher = createDecipheriv('aes-256-gcm', key.key, Buffer.from(enc.nonce, 'base64'));
-      decipher.setAAD(Buffer.from(enc.aad, 'utf-8'));
-      decipher.setAuthTag(sealed.subarray(sealed.length - TAG_BYTES));
-      body = Buffer.concat([
-        decipher.update(sealed.subarray(0, sealed.length - TAG_BYTES)),
-        decipher.final(),
-      ]).toString('utf-8');
+      body = openBytes(
+        Buffer.from(sealedLine, 'base64'),
+        key.key,
+        Buffer.from(enc.nonce, 'base64'),
+        enc.aad
+      ).toString('utf-8');
     } catch {
       throw new BackupFormatError(
         'Backup decryption failed: the file was modified or corrupted (authentication tag mismatch)'

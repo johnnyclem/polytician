@@ -8,11 +8,16 @@ import { NamespaceDeniedError } from '../errors/index.js';
  * process are trusted and are not checked.
  */
 
+/** Whether the allowlist lets tool calls address `namespace`. */
+export function isNamespaceAllowed(namespace: string): boolean {
+  const allowed = getConfig().namespaces;
+  return allowed === null || allowed === '*' || allowed.includes(namespace);
+}
+
 /** The namespace a tool call addresses (default 'default'), if the allowlist permits it. */
 export function resolveNamespace(namespace: string | undefined): string {
   const ns = namespace ?? 'default';
-  const allowed = getConfig().namespaces;
-  if (allowed !== null && allowed !== '*' && !allowed.includes(ns)) {
+  if (!isNamespaceAllowed(ns)) {
     throw new NamespaceDeniedError(
       `Namespace '${ns}' is not in this server's POLYTICIAN_NAMESPACES allowlist`
     );

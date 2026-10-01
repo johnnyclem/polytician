@@ -69,6 +69,11 @@ A `save_concept` create must include at least one of `markdown`, `thoughtform` o
 
 `batch_save_concepts` is all-or-nothing: one invalid entry fails the whole call and nothing is written. Validate or split input if you relied on partial success. The batch-wide `namespace` argument applies to all entries.
 
+### AgentVault tools
+
+- `vault_memory_pull` no longer overwrites a local concept with an older or undated remote entry, and skips entries recorded for another namespace or with non-UUID ids; read `skipped` in the result. It now also embeds pulled concepts.
+- `vault_archive_concept` exists only when the operator enabled archival, and it refuses concepts that do not carry every `archival.tagFilter` tag (`VALIDATION_ERROR`, "Not archived: ..."), and a version that was already archived.
+
 ### Backups
 
 - `agentvault_backup` is gone (it never persisted anything). Call `export_backup` (optionally `{ namespace }` or `{ encrypt: true }`); it returns the `file` name to pass to `import_backup { file }`. `list_backups` lists them.
@@ -82,6 +87,12 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 ## Operators
 
 - Remove `POLYTICIAN_ASYNC_INDEX_SYNC` / `distributed.asyncIndexSync`; it no longer exists. Writes update the row and its vector in one transaction, so nothing needs syncing.
+- **Move your config file.** `.polytician.json` in the working directory and `~/.polytician.json` are no longer read. Move the file to `~/.polytician/config.json`, or start the server with `--config /path/to/file.json`. Check it is valid JSON: an unparseable file now stops the server.
+- **`${VAR}` in config values** may only name `POLYTICIAN_*` variables. Rename, for example `"apiToken": "${AV_TOKEN}"` → `"${POLYTICIAN_AV_TOKEN}"` and export that variable. Do not put `${...}` in `POLYTICIAN_AV_API_TOKEN`; it is used literally.
+- **AgentVault over `https`.** Change an `http://` `apiBaseUrl` / `POLYTICIAN_AV_API_URL` to `https://` (plain `http` works only for localhost).
+- **LLM provider.** Remove `POLYTICIAN_LLM_MODEL`, `POLYTICIAN_LLM_API_KEY`, `llm.model`, `llm.apiKey` and `agentVault.secrets` (none of them did anything). If you set `POLYTICIAN_LLM_PROVIDER` to `anthropic`, `openai` or `sampling`, the server now refuses to start: those providers never existed, so remove the setting (or set `agentvault`). **If you relied on AgentVault inference running without `POLYTICIAN_LLM_PROVIDER`,** set `POLYTICIAN_LLM_PROVIDER=agentvault`; without it, `vector → *` and `markdown → thoughtform` (without the rule-based pipeline) fail with `CONVERSION_ERROR`.
+- **Arweave archival.** If `agentVault.archival.enabled` is true, add a non-empty `archival.tagFilter` (only concepts carrying every listed tag are archived) and a backup key (see "Backups and encryption"); without both the server refuses to start. Archives are now encrypted: keep the backup key, since `openArchive()` needs it to read them. Tags and namespace are no longer uploaded as public Arweave tags.
+- **AgentVault retries.** Commits, tombstones and uploads are no longer retried. If a sync push fails transiently, it is logged and the next update of that concept pushes it again; run `agentvault-sync sync --direction push` to push everything.
 - Decide on `POLYTICIAN_NAMESPACES`. Leave it unset for a single-user server, set it to the list of namespaces a server should expose, or set `*` to allow every namespace and enable `crossNamespace` search. The allowlist does not authenticate callers; see "Namespaces" in the README.
 
 ### Backups and encryption

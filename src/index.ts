@@ -5,9 +5,9 @@ import { createServer } from './server.js';
 import { initializeDatabaseAsync, closeDatabase } from './db/client.js';
 import { startHealthServer } from './health.js';
 import { logger } from './logger.js';
-import { conversionService } from './services/conversion.service.js';
 import { backupService } from './services/backup.service.js';
-import { getConfig, resetConfig } from './config.js';
+import { getConfig } from './config.js';
+import { configureProviders } from './providers/configure.js';
 import type { AgentVaultEventBridge } from './integrations/agent-vault/connectors/event-bridge.js';
 
 async function main(): Promise<void> {
@@ -18,35 +18,21 @@ async function main(): Promise<void> {
   // Start HTTP health check server
   const healthServer = startHealthServer();
 
-  // Load config
-  let config = getConfig();
+  // Load config (env, --config or ~/.polytician/config.json; never the cwd)
+  const config = getConfig();
 
-  // Optional: inject secrets from AgentVault before config is cached
-  if (config.agentVault?.secrets.llmApiKey) {
-    const { AgentVaultSecretProvider } =
-      await import('./integrations/agent-vault/providers/agentvault-secret.provider.js');
-    const secretProvider = new AgentVaultSecretProvider(config.agentVault);
-    await secretProvider.injectSecrets();
-    resetConfig();
-    config = getConfig();
-  }
+  await configureProviders(config);
 
-  // Wire AgentVault LLM provider if configured
-  if (
-    config.agentVault &&
-    (config.llm.provider === 'agentvault' || config.llm.provider === 'none')
-  ) {
-    const { AgentVaultLLMProvider } =
-      await import('./integrations/agent-vault/providers/agentvault-llm.provider.js');
-    conversionService.setLLMProvider(new AgentVaultLLMProvider(config.agentVault));
-    logger.info('llm provider set to agentvault');
-  }
-
-  // Wire the configured NLP pipeline (used by markdown→thoughtform conversion)
-  if (config.nlp.pipeline === 'rule-based') {
-    const { RuleBasedNLPPipeline } = await import('./providers/rule-based-nlp.pipeline.js');
-    conversionService.setNLPPipeline(new RuleBasedNLPPipeline());
-    logger.info('nlp pipeline set to rule-based');
+  if (config.agentVault) {
+    // Every off-box destination, so operators can see where data may go.
+    logger.info('agentvault integration enabled', {
+      endpoint: config.agentVault.apiBaseUrl,
+      llm: config.llm.provider === 'agentvault',
+      sync: config.agentVault.sync.enabled ? config.agentVault.sync.direction : 'off',
+      archival: config.agentVault.archival.enabled
+        ? { tagFilter: config.agentVault.archival.tagFilter }
+        : 'off',
+    });
   }
 
   // Start AgentVault event bridge if configured
