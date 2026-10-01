@@ -1,4 +1,5 @@
 import type { ThoughtFormV1 } from '../schemas/thoughtform.js';
+import { computeContentHash } from './hash.js';
 
 // --- PolyVault conflict resolution engine ---
 // Deterministic merge/rebase conflict resolution for ThoughtForm sync.
@@ -49,8 +50,12 @@ export function resolveConflict(
 ): ConflictRecord {
   const { policy, prefer, skewWindowMs = DEFAULT_SKEW_WINDOW_MS } = options;
 
-  // Fast path: identical content → no real conflict
-  if (local.metadata.contentHash === remote.metadata.contentHash) {
+  // Fast path: identical content → no real conflict. The content itself is
+  // compared, so a stale producer-supplied contentHash cannot hide an edit.
+  if (
+    local.metadata.contentHash === remote.metadata.contentHash &&
+    computeContentHash(local) === computeContentHash(remote)
+  ) {
     // Pick the one with higher updatedAtMs for consistency
     const winner = local.metadata.updatedAtMs >= remote.metadata.updatedAtMs ? local : remote;
     return {
@@ -211,19 +216,4 @@ export function mergeThoughtformSets(
   });
 
   return { merged, conflicts };
-}
-
-/**
- * Compute the effective delta lower bound accounting for clock skew.
- *
- * Uses: min(lastSyncedAtMs, observedRemoteMaxUpdatedAtMs) - skewWindowMs
- * to ensure no updates are missed due to clock drift.
- */
-export function computeSkewSafeLowerBound(
-  lastSyncedAtMs: number,
-  observedRemoteMaxUpdatedAtMs: number,
-  skewWindowMs: number = DEFAULT_SKEW_WINDOW_MS
-): number {
-  const effectiveBase = Math.min(lastSyncedAtMs, observedRemoteMaxUpdatedAtMs);
-  return Math.max(0, effectiveBase - skewWindowMs);
 }

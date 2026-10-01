@@ -360,7 +360,7 @@ npx tsx bin/agentvault-sync.ts restore --file backup.jsonl [--on-conflict newer|
 npx tsx bin/agentvault-sync.ts sync    --direction bidirectional
 ```
 
-PolyVault (`src/polyvault/`, `src/commands/polyvault/`) is a separate, chunked backup format for an Internet Computer canister; see [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md).
+**PolyVault is experimental.** `src/polyvault/`, `src/lib/polyvault/` and `src/commands/polyvault/` implement a separate, chunked backup format for an Internet Computer canister (`src/agentvault_polyvault/`), but they are a library only: no shipped command, tool or startup path calls them, and their interfaces may change in a minor release. Use the backup files above for backups. See [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md).
 
 ---
 
@@ -383,7 +383,7 @@ Requests that change state on AgentVault (memory commits, tombstones, archival u
 See also:
 
 - [`AGENTVAULT_COMPATIBILITY_PRD.md`](AGENTVAULT_COMPATIBILITY_PRD.md) — the spec for AgentVault's side of this integration
-- [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md) — the encrypted backup/restore bridge (PolyVault)
+- [`docs/polyvault/spec-v1.md`](docs/polyvault/spec-v1.md) — the encrypted backup/restore bridge to an IC canister (PolyVault, experimental, library only)
 - [`docs/ecosystem/executive-summary.md`](docs/ecosystem/executive-summary.md) and [`docs/ecosystem/engineering-guide.md`](docs/ecosystem/engineering-guide.md) — cross-repo ecosystem evaluation, including what's actually shipped vs. still aspirational on AgentVault's side
 
 ---
@@ -436,7 +436,7 @@ polytician/
 │   ├── services/               # concept, conversion, embedding, backup, index-sync
 │   ├── backup/                 # Backup file format (JSONL), key loading, backups directory
 │   ├── mcp/tools/              # export_backup / import_backup / list_backups
-│   ├── polyvault/ & lib/polyvault/  # PolyVault chunked canister format + FAISS client
+│   ├── polyvault/ & lib/polyvault/  # PolyVault (experimental, library only) + FAISS client
 │   ├── integrations/agent-vault/    # AgentVault config, providers, vault_* tools
 │   └── sidecar/                # HTTP client for the optional Python sidecar
 ├── python-sidecar/             # Optional Flask helper: FAISS rebuild, PolyVault bundles

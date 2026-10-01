@@ -1,31 +1,41 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { runRebase, type RebaseOptions, type RebaseState } from '../../src/commands/polyvault/rebase.js';
 import { SCHEMA_VERSION_V1 } from '../../src/schemas/thoughtform.js';
 import type { ThoughtFormV1 } from '../../src/schemas/thoughtform.js';
+import { withContentHash } from '../../src/polyvault/hash.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // --- Fixtures ---
 
-function makeTf(overrides: Partial<ThoughtFormV1> & { id: string }): ThoughtFormV1 {
-  const defaults = {
-    createdAtMs: 1730000000000,
-    updatedAtMs: 1730000000000,
-    source: 'local' as const,
-    contentHash: 'a'.repeat(64),
-    redaction: { rawTextOmitted: false },
-  };
+function makeTf(
+  overrides: Partial<Omit<ThoughtFormV1, 'metadata'>> & {
+    id: string;
+    metadata?: Partial<ThoughtFormV1['metadata']>;
+  }
+): ThoughtFormV1 {
   const { metadata: metaOverrides, ...rest } = overrides;
-  return {
+  return withContentHash({
     schemaVersion: SCHEMA_VERSION_V1,
-    id: overrides.id,
     entities: [],
     relationships: [],
     contextGraph: {},
-    metadata: { ...defaults, ...metaOverrides },
+    rawText: `text of ${overrides.id}`,
     ...rest,
-  };
+    metadata: {
+      createdAtMs: 1730000000000,
+      updatedAtMs: 1730000000000,
+      source: 'local',
+      contentHash: '',
+      redaction: { rawTextOmitted: false },
+      ...metaOverrides,
+    },
+  } as ThoughtFormV1);
+}
+
+function commit(commitId: string, createdAtMs: number, thoughtforms: ThoughtFormV1[]) {
+  return { commitId, createdAtMs, thoughtforms };
 }
 
 const testDir = join(tmpdir(), `polyvault-rebase-test-${Date.now()}`);
@@ -52,102 +62,88 @@ function defaultOpts(overrides: Partial<RebaseOptions> = {}): RebaseOptions {
     out: outPath,
     nonInteractive: true,
     stateFile: stateFilePath,
-    localBaseUpdatedAtMs: 0,
-    observedRemoteMaxUpdatedAtMs: 0,
     ...overrides,
   };
+}
+
+function write(local: unknown, remote: unknown): void {
+  writeFileSync(localPath, JSON.stringify(local));
+  writeFileSync(remotePath, JSON.stringify(remote));
 }
 
 // --- Tests ---
 
 describe('runRebase CLI', () => {
-  it('rebases remote delta into local set', async () => {
-    const local = [makeTf({ id: 'tf_local', metadata: { updatedAtMs: 5000, contentHash: 'a'.repeat(64) } })];
-    const remote = [makeTf({ id: 'tf_remote', metadata: { updatedAtMs: 8000, contentHash: 'b'.repeat(64) } })];
-    writeFileSync(localPath, JSON.stringify(local));
-    writeFileSync(remotePath, JSON.stringify(remote));
+  it('rebases the new commits into the local set', async () => {
+    write(
+      [makeTf({ id: 'tf_local', metadata: { updatedAtMs: 5000 } })],
+      [commit('cmt_1', 100, [makeTf({ id: 'tf_remote', metadata: { updatedAtMs: 8000 } })])]
+    );
 
-    const { result, exitCode } = await runRebase(defaultOpts({
-      localBaseUpdatedAtMs: 1000,
-      observedRemoteMaxUpdatedAtMs: 8000,
-      skewWindowMs: 500,
-    }));
+    const { result, exitCode } = await runRebase(defaultOpts({ lastApplied: null }));
 
     expect(exitCode).toBe(0);
     expect(result.status).toBe('ok');
     expect(result.mergedCount).toBe(2);
     expect(result.remoteDeltaCount).toBe(1);
-    expect(result.newBaseUpdatedAtMs).toBe(8000);
+    expect(result.lastApplied).toEqual({ commitId: 'cmt_1', createdAtMs: 100 });
   });
 
-  it('persists rebase state to file', async () => {
-    const local = [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5000 } })];
-    const remote = [makeTf({ id: 'tf_2', metadata: { updatedAtMs: 8000 } })];
-    writeFileSync(localPath, JSON.stringify(local));
-    writeFileSync(remotePath, JSON.stringify(remote));
+  it('persists the last applied commit and resumes after it', async () => {
+    write(
+      [makeTf({ id: 'tf_1' })],
+      [commit('cmt_1', 100, [makeTf({ id: 'tf_2', metadata: { updatedAtMs: 8000 } })])]
+    );
+    await runRebase(defaultOpts());
 
-    await runRebase(defaultOpts({
-      localBaseUpdatedAtMs: 0,
-      observedRemoteMaxUpdatedAtMs: 0,
-    }));
-
-    expect(existsSync(stateFilePath)).toBe(true);
     const state = JSON.parse(readFileSync(stateFilePath, 'utf-8')) as RebaseState;
-    expect(state.localBaseUpdatedAtMs).toBeGreaterThan(0);
-    expect(state.observedRemoteMaxUpdatedAtMs).toBeGreaterThanOrEqual(8000);
+    expect(state.lastApplied).toEqual({ commitId: 'cmt_1', createdAtMs: 100 });
     expect(state.lastRebasedAtMs).toBeGreaterThan(0);
+
+    // A later commit holds an edit made long before the previous rebase
+    // (an offline device): it is still applied, because it is a new commit.
+    write(JSON.parse(readFileSync(outPath, 'utf-8')), [
+      commit('cmt_1', 100, [makeTf({ id: 'tf_2', metadata: { updatedAtMs: 8000 } })]),
+      commit('cmt_2', 200, [makeTf({ id: 'tf_3', metadata: { updatedAtMs: 1 } })]),
+    ]);
+    const { result } = await runRebase(defaultOpts());
+    expect(result.appliedCommitCount).toBe(1);
+    expect(result.remoteDeltaCount).toBe(1);
+    expect(result.mergedCount).toBe(3);
+    expect(result.lastApplied).toEqual({ commitId: 'cmt_2', createdAtMs: 200 });
   });
 
-  it('loads rebase state from file for subsequent runs', async () => {
-    // First run
-    const local1 = [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5000 } })];
-    const remote1 = [makeTf({ id: 'tf_2', metadata: { updatedAtMs: 8000 } })];
-    writeFileSync(localPath, JSON.stringify(local1));
-    writeFileSync(remotePath, JSON.stringify(remote1));
-
-    await runRebase(defaultOpts({
-      localBaseUpdatedAtMs: 0,
-      observedRemoteMaxUpdatedAtMs: 0,
-    }));
-
-    // Second run without explicit timestamps — should read from state file
-    const local2 = [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5000 } })];
-    const remote2 = [
-      makeTf({ id: 'tf_2', metadata: { updatedAtMs: 8000 } }),
-      makeTf({ id: 'tf_3', metadata: { updatedAtMs: 12000 } }),
-    ];
-    writeFileSync(localPath, JSON.stringify(local2));
-    writeFileSync(remotePath, JSON.stringify(remote2));
-
-    const { result } = await runRebase({
-      local: localPath,
-      remote: remotePath,
-      policy: 'updatedAt',
-      out: outPath,
-      nonInteractive: true,
-      stateFile: stateFilePath,
-      // No explicit timestamps — should load from state
-    });
-
-    expect(result.status).toBe('ok');
+  it('treats a 2.x timestamp state file as a first rebase', async () => {
+    mkdirSync(join(testDir, '.polyvault'), { recursive: true });
+    writeFileSync(
+      stateFilePath,
+      JSON.stringify({ localBaseUpdatedAtMs: 9e12, observedRemoteMaxUpdatedAtMs: 9e12, lastRebasedAtMs: 1 })
+    );
+    write([], [commit('cmt_1', 100, [makeTf({ id: 'tf_1', metadata: { updatedAtMs: 5 } })])]);
+    const { result } = await runRebase(defaultOpts());
+    expect(result.remoteDeltaCount).toBe(1);
   });
 
   it('handles conflicting IDs during rebase', async () => {
-    const local = [makeTf({ id: 'tf_shared', metadata: { updatedAtMs: 5000, contentHash: 'a'.repeat(64) } })];
-    const remote = [makeTf({ id: 'tf_shared', metadata: { updatedAtMs: 7000, contentHash: 'b'.repeat(64) } })];
-    writeFileSync(localPath, JSON.stringify(local));
-    writeFileSync(remotePath, JSON.stringify(remote));
+    write(
+      [makeTf({ id: 'tf_shared', rawText: 'mine', metadata: { updatedAtMs: 5000 } })],
+      [commit('cmt_1', 100, [makeTf({ id: 'tf_shared', rawText: 'theirs', metadata: { updatedAtMs: 7000 } })])]
+    );
 
     const conflictPath = join(testDir, 'conflicts.json');
-    const { result } = await runRebase(defaultOpts({
-      localBaseUpdatedAtMs: 1000,
-      observedRemoteMaxUpdatedAtMs: 7000,
-      conflictReport: conflictPath,
-    }));
+    const { result } = await runRebase(defaultOpts({ conflictReport: conflictPath }));
 
     expect(result.mergedCount).toBe(1);
     expect(result.conflictCount).toBe(1);
     expect(existsSync(conflictPath)).toBe(true);
+  });
+
+  it('rejects a ThoughtForm whose contentHash does not match its content', async () => {
+    const stale = { ...makeTf({ id: 'tf_1' }), rawText: 'edited without rehashing' };
+    write([], [commit('cmt_1', 100, [stale])]);
+    const { result, exitCode } = await runRebase(defaultOpts());
+    expect(exitCode).toBe(2);
+    expect(result.status).toBe('error');
   });
 
   it('returns validation error for invalid input', async () => {
@@ -157,5 +153,11 @@ describe('runRebase CLI', () => {
     const { result, exitCode } = await runRebase(defaultOpts());
     expect(exitCode).toBe(2);
     expect(result.status).toBe('error');
+  });
+
+  it('requires remote commits, not a bare ThoughtForm array', async () => {
+    write([], [makeTf({ id: 'tf_1' })]);
+    const { exitCode } = await runRebase(defaultOpts());
+    expect(exitCode).toBe(2);
   });
 });

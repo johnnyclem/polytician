@@ -7,7 +7,12 @@ import {
   ChunkReassemblyError,
 } from '../../polyvault/chunker.js';
 import { decompress, type CompressionMode } from '../../polyvault/compress.js';
-import { createCryptoAdapter, type EncryptionMode } from '../../polyvault/crypto.js';
+import {
+  createCryptoAdapter,
+  openPayload,
+  payloadAad,
+  type EncryptionMode,
+} from '../../polyvault/crypto.js';
 import { sha256 } from '../../polyvault/hash.js';
 import {
   fetchCommits,
@@ -43,10 +48,11 @@ export interface RestoreOptions {
   encryption: EncryptionMode;
   /** Timestamp for incremental restore (fetch commits created after this). 0 for full. */
   sinceCommitCreatedAtMs: number;
-  /** Decryption key (required if encryption != 'none'). */
+  /**
+   * Decryption key (required if encryption != 'none'). Each commit's nonce is
+   * stored in front of its ciphertext.
+   */
   decryptionKey?: Uint8Array;
-  /** Nonce for decryption (required if encryption != 'none'). */
-  decryptionNonce?: Uint8Array;
   /** Output path for restore manifest JSON (optional). */
   out?: string;
   /** Network profile: 'local' (lower timeouts) or 'ic' (higher timeouts). */
@@ -199,19 +205,16 @@ export async function runRestore(
     let decrypted: Uint8Array;
     const encrypted = chunkRecords[0]!.encrypted;
     if (encrypted && options.encryption !== 'none') {
-      if (!options.decryptionKey || !options.decryptionNonce) {
-        return failRestore(
-          'Decryption key and nonce required for encrypted data',
-          EXIT_VALIDATION,
-          startMs
-        );
+      if (!options.decryptionKey) {
+        return failRestore('Decryption key required for encrypted data', EXIT_VALIDATION, startMs);
       }
       const adapter = createCryptoAdapter(options.encryption);
       try {
-        decrypted = await adapter.decrypt(
+        decrypted = await openPayload(
+          adapter,
           reassembled,
           options.decryptionKey,
-          options.decryptionNonce
+          payloadAad(chunkRecords[0]!.bundleId, commit.commitId)
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

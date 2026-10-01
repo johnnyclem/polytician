@@ -1,8 +1,14 @@
 # PolyVault v1.0 Specification
 
+> **Status: experimental, library only.** The modules described here are not wired to any shipped command, MCP tool or startup path, and their interfaces may change in a minor release. Polytician's supported backups are the JSONL files written by `export_backup` (see the README).
+
 ## Overview
 
-PolyVault is the backup/restore bridge between local Polytician ThoughtForms and on-chain AgentVault storage on the Internet Computer. It provides deterministic, idempotent, and encrypted sync of semantic memory records.
+PolyVault is the backup/restore bridge between local Polytician ThoughtForms and on-chain AgentVault storage on the Internet Computer. Its properties, each with its boundary:
+
+- **Deterministic serialization:** the same bundle value always serializes to the same bytes (keys sorted recursively).
+- **Idempotent backup:** re-running a backup whose ThoughtForms have the same ids, `updatedAtMs` and content returns `duplicateOf` instead of a new commit. Any edit, rename or touch produces a new commit.
+- **Encryption:** AES-256-GCM with a fresh random nonce per commit, stored in front of the ciphertext; restore needs only the key.
 
 ## Architecture
 
@@ -57,7 +63,7 @@ Transport envelope for backup/restore. Contains a commit record, manifest, delta
 
 ### Backup (local to on-chain)
 
-1. Read and validate ThoughtForms
+1. Read and validate ThoughtForms. Each `metadata.contentHash` must equal the content hash computed from the ThoughtForm (see below); a mismatch is a validation error (exit 2)
 2. Filter by `sinceUpdatedAt` (exclusive lower bound)
 3. Canonical sort: `updatedAtMs asc, id asc, contentHash asc`
 4. Build bundle with deterministic `dedupeKey`
@@ -65,23 +71,32 @@ Transport envelope for backup/restore. Contains a commit record, manifest, delta
 6. Upload chunks with idempotency keys
 7. Finalize commit on canister
 
-**Idempotency:** `dedupeKey = sha256(contentFingerprint + ':' + compress + ':' + encrypt)`. Re-running unchanged backup returns `duplicateOf` with no new storage.
+**Content hash:** `contentHash = sha256hex(canonicalJson({ rawText (null if omitted), entities, relationships, contextGraph }))`, where canonical JSON sorts object keys recursively. Metadata is not part of it. `computeContentHash()` / `withContentHash()` in `src/polyvault/hash.ts` compute it for producers.
+
+**Idempotency:** `dedupeKey = sha256(contentFingerprint + ':' + compress + ':' + encrypt)`, where `contentFingerprint` joins `id@updatedAtMs#contentHash` for every ThoughtForm in canonical order. Re-running an unchanged backup returns `duplicateOf` with no new storage.
+
+**Encrypted payload:** `nonce (12 bytes) || AES-256-GCM ciphertext || tag (16 bytes)`, with AAD `polyvault/1:<bundleId>:<commitId>`, so a payload cannot be replayed under another commit.
 
 ### Restore (on-chain to local)
 
 1. List commits (paginated) since checkpoint
 2. Fetch chunks per commit (paginated)
 3. Reassemble and validate hashes
-4. Decrypt (if encrypted) and decompress
+4. Decrypt (if encrypted; the nonce is read from the payload) and decompress
 5. Deserialize and schema validate
 6. Deduplicate by ID (last-writer-wins by `updatedAtMs`)
 7. Upsert into SQLite (local-first: newer local data preserved)
 8. Trigger FAISS index rebuild
 
+### Rebase (remote commits onto the local set)
+
+Which remote changes are new is decided by **commit order**: each commit's `createdAtMs` is assigned by the canister when the commit is finalized, and the rebase state stores the last commit applied (`{ commitId, createdAtMs }`). A rebase takes every ThoughtForm from the commits after that cursor, ordered by `(createdAtMs, commitId)`, regardless of the ThoughtForms' own `updatedAtMs`: a device that was offline commits day-old edits, and those must still be applied. `updatedAtMs` is used only to resolve conflicts (below). Remote input is an array of `{ commitId, createdAtMs, thoughtforms }`.
+
 ### Conflict Resolution
 
 Deterministic policy (no interactive prompts):
 
+0. Equal `contentHash` **and** equal content (recomputed) → no conflict
 1. Higher `updatedAtMs` wins
 2. Tie: higher `contentHash` (lexical hex) wins
 3. Tie: compare `source`, then `id`
@@ -93,7 +108,7 @@ Deterministic policy (no interactive prompts):
 
 - Default: AES-256-GCM per bundle chunk (`vetkeys-aes-gcm-v1`)
 - Fail-closed: `encryptionRequired=true` prevents plaintext upload
-- Per-operation random nonce (never derived or reused)
+- Per-commit random nonce (never derived or reused), stored in front of the ciphertext
 - Key material never logged, stored in files, or passed via CLI args
 
 ### Access Control

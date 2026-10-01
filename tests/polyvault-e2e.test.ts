@@ -10,14 +10,14 @@ import type { DatabaseAdapter, ConceptRow, ListRow, VectorResult, ConceptMetaRow
 import type { ThoughtFormV1 } from '../src/schemas/thoughtform.js';
 import { serializeBundle } from '../src/polyvault/serializer.js';
 import { chunkPayload } from '../src/polyvault/chunker.js';
-import { sha256String } from '../src/polyvault/hash.js';
+import { sha256String, withContentHash } from '../src/polyvault/hash.js';
 
 // --- Fixtures ---
 
 const CONTENT_HASH = 'a'.repeat(64);
 
 function makeThoughtForm(id: string, updatedAt = 1730000000000, rawText = 'hello'): ThoughtFormV1 {
-  return {
+  return withContentHash({
     schemaVersion: '1.0',
     id,
     entities: [{ id: 'e1', type: 'concept', value: rawText }],
@@ -31,7 +31,7 @@ function makeThoughtForm(id: string, updatedAt = 1730000000000, rawText = 'hello
       redaction: { rawTextOmitted: false },
     },
     rawText,
-  } as ThoughtFormV1;
+  } as ThoughtFormV1);
 }
 
 // --- In-memory DB adapter stub ---

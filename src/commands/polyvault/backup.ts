@@ -3,8 +3,13 @@ import { parseThoughtForm } from '../../lib/polyvault/validate.js';
 import { serializeBundle } from '../../polyvault/serializer.js';
 import { chunkPayload, MAX_CHUNK_SIZE } from '../../polyvault/chunker.js';
 import { compress, type CompressionMode } from '../../polyvault/compress.js';
-import { requireEncryptionAdapter, type EncryptionMode } from '../../polyvault/crypto.js';
-import { sha256String } from '../../polyvault/hash.js';
+import {
+  payloadAad,
+  requireEncryptionAdapter,
+  sealPayload,
+  type EncryptionMode,
+} from '../../polyvault/crypto.js';
+import { computeContentHash, sha256String } from '../../polyvault/hash.js';
 import {
   uploadBundle,
   ChunkUploadError,
@@ -71,11 +76,12 @@ export interface BackupResult {
  * Run the PolyVault backup pipeline (non-interactive).
  *
  * Steps per PRD 3.1:
- * 1. Read and validate ThoughtForms from input file.
+ * 1. Read and validate ThoughtForms from input file; each metadata.contentHash
+ *    must equal computeContentHash() of its content.
  * 2. Filter by sinceUpdatedAt (exclusive lower bound).
  * 3. Canonical sort: updatedAtMs asc, id asc, contentHash asc.
  * 4. Build bundle + compute commitId/dedupeKey.
- * 5. Serialize -> compress -> encrypt -> chunk.
+ * 5. Serialize -> compress -> encrypt (nonce stored in front of the ciphertext) -> chunk.
  * 6. Upload chunks with idempotency keys.
  * 7. Finalize commit.
  * 8. Write manifest if --out provided.
@@ -114,6 +120,16 @@ export async function runBackup(
     if (parsed.ok === false) {
       const paths = parsed.errors.map(e => `${e.path}: ${e.message}`).join('; ');
       return failBackup(`ThoughtForm[${i}] validation failed: ${paths}`, EXIT_VALIDATION, startMs);
+    }
+    // The hash drives dedupe and conflict tie-breaks, so it must describe the
+    // content actually being backed up, not whatever the producer last wrote.
+    const expected = computeContentHash(parsed.data);
+    if (parsed.data.metadata.contentHash !== expected) {
+      return failBackup(
+        `ThoughtForm[${i}] metadata.contentHash does not match its content (expected ${expected}); recompute it with withContentHash()`,
+        EXIT_VALIDATION,
+        startMs
+      );
     }
     thoughtforms.push(parsed.data);
   }
@@ -182,11 +198,14 @@ export async function runBackup(
   const sinceExclusive = options.sinceUpdatedAt;
   const untilInclusive = Math.max(...updatedAtValues);
 
-  // Compute content-based dedupeKey from sorted ThoughtForm content hashes.
-  // This ensures identical data produces the same dedupeKey regardless of
-  // when the backup runs (PRD: "Re-running backup with unchanged data
-  // returns duplicateOf and no new storage growth").
-  const contentFingerprint = filtered.map(tf => tf.metadata.contentHash).join(':');
+  // Compute the dedupeKey from each ThoughtForm's id, updatedAtMs and
+  // (verified) contentHash, so identical data produces the same dedupeKey
+  // regardless of when the backup runs (PRD: "Re-running backup with
+  // unchanged data returns duplicateOf and no new storage growth"), and any
+  // edit, rename or touch produces a new one.
+  const contentFingerprint = filtered
+    .map(tf => `${tf.id}@${tf.metadata.updatedAtMs}#${tf.metadata.contentHash}`)
+    .join('\n');
   const dedupeKey = sha256String(
     contentFingerprint + ':' + options.compress + ':' + options.encrypt
   );
@@ -233,8 +252,13 @@ export async function runBackup(
     if (!options.encryptionKey) {
       return failBackup('Encryption key required but not provided', EXIT_VALIDATION, startMs);
     }
-    const { ciphertext } = await cryptoAdapter.encrypt(compressedBytes, options.encryptionKey);
-    finalBytes = ciphertext;
+    // The nonce travels with the ciphertext, so restore needs only the key.
+    finalBytes = await sealPayload(
+      cryptoAdapter,
+      compressedBytes,
+      options.encryptionKey,
+      payloadAad(bundleId, commitId)
+    );
   } else {
     finalBytes = compressedBytes;
   }

@@ -36,12 +36,14 @@ import { runBackup, type BackupOptions } from '../../src/commands/polyvault/back
 import type { CanisterClient, PutChunkRequest, FinalizeResult } from '../../src/lib/polyvault/upload.js';
 import { SCHEMA_VERSION_V1 } from '../../src/schemas/thoughtform.js';
 import type { ThoughtFormV1 } from '../../src/schemas/thoughtform.js';
+import { withContentHash } from '../../src/polyvault/hash.js';
 import type { BundleV1 } from '../../src/schemas/bundle.js';
 
 // --- Fixtures ---
 
+/** A ThoughtForm whose metadata.contentHash matches its content, as backup requires. */
 function makeThoughtForm(overrides: Partial<ThoughtFormV1> = {}): ThoughtFormV1 {
-  return {
+  return withContentHash({
     schemaVersion: SCHEMA_VERSION_V1,
     id: 'tf_restore_01',
     rawText: 'hello world',
@@ -56,7 +58,7 @@ function makeThoughtForm(overrides: Partial<ThoughtFormV1> = {}): ThoughtFormV1 
       redaction: { rawTextOmitted: false },
     },
     ...overrides,
-  };
+  });
 }
 
 // --- In-memory canister that supports both backup and restore ---
@@ -724,42 +726,92 @@ describe('runRestore', () => {
 
   // --- Encryption roundtrip ---
 
-  it('restores encrypted data with correct key and nonce', async () => {
+  it('restores encrypted backups with the key alone (POLY-11)', async () => {
     const key = randomBytes(32);
-    const tf = makeThoughtForm();
-    const inputPath = writeInput([tf]);
+    const tf1 = makeThoughtForm({ id: 'tf_enc_1', rawText: 'first secret' });
+    const inputPath1 = writeInput([tf1]);
+    const encrypted = {
+      encrypt: 'vetkeys-aes-gcm-v1' as const,
+      encryptionRequired: true,
+      encryptionKey: new Uint8Array(key),
+    };
+    const { exitCode: b1 } = await runBackup(
+      canister,
+      defaultBackupOptions({ from: inputPath1, compress: 'gzip', ...encrypted })
+    );
+    expect(b1).toBe(EXIT_SUCCESS);
 
-    // Backup with encryption
+    // A second commit gets its own nonce; restore reads each from its payload.
+    const tf2 = makeThoughtForm({
+      id: 'tf_enc_2',
+      rawText: 'second secret',
+      metadata: { ...tf1.metadata, updatedAtMs: 1730000005000 },
+    });
+    const inputPath2 = join(tempDir, 'input2.json');
+    writeFileSync(inputPath2, JSON.stringify([tf2]));
+    await runBackup(canister, defaultBackupOptions({ from: inputPath2, ...encrypted }));
+
+    for (const chunk of canister.chunks.values()) {
+      expect(Buffer.from(chunk.payload).toString('utf-8')).not.toContain('secret');
+    }
+
+    const { result, exitCode } = await runRestore(
+      canister,
+      defaultRestoreOptions({
+        compression: 'gzip',
+        encryption: 'vetkeys-aes-gcm-v1',
+        decryptionKey: new Uint8Array(key),
+      })
+    );
+    expect(exitCode).toBe(EXIT_SUCCESS);
+    expect(result.commitCount).toBe(2);
+    const output = JSON.parse(readFileSync(defaultRestoreOptions().to, 'utf-8')) as ThoughtFormV1[];
+    expect(output.map(tf => tf.rawText).sort()).toEqual(['first secret', 'second secret']);
+  });
+
+  it('fails with EXIT_INTEGRITY for the wrong key', async () => {
+    const tf = makeThoughtForm();
     await runBackup(
       canister,
       defaultBackupOptions({
-        from: inputPath,
+        from: writeInput([tf]),
         encrypt: 'vetkeys-aes-gcm-v1',
         encryptionRequired: true,
-        encryptionKey: new Uint8Array(key),
+        encryptionKey: new Uint8Array(randomBytes(32)),
       })
     );
-
-    // The encrypted data includes a nonce prepended or stored somewhere.
-    // For this test, we need to extract the nonce from the encrypted payload.
-    // In the backup pipeline, AES-GCM generates a random nonce.
-    // For restore, we need that nonce. In a real system, the nonce would be stored
-    // alongside the ciphertext. Since the crypto adapter appends auth tag to ciphertext,
-    // and the nonce is returned separately, we need a way to pass it.
-
-    // For the purpose of this test, we'll skip encrypted restore roundtrip
-    // since the nonce from backup isn't stored alongside chunks in the current
-    // implementation. This is an integration concern for PR11.
-    // Instead, verify that missing decryption key returns EXIT_VALIDATION.
     const { result, exitCode } = await runRestore(
       canister,
       defaultRestoreOptions({
         encryption: 'vetkeys-aes-gcm-v1',
+        decryptionKey: new Uint8Array(randomBytes(32)),
       })
     );
+    expect(exitCode).toBe(EXIT_INTEGRITY);
+    expect((result as unknown as { error: string }).error).toMatch(/wrong key/);
+  });
 
-    expect(exitCode).toBe(EXIT_VALIDATION);
-    expect(result.status).toBe('error');
+  it('binds the ciphertext to its commit (chunks moved to another commit fail)', async () => {
+    const key = new Uint8Array(randomBytes(32));
+    const encrypted = { encrypt: 'vetkeys-aes-gcm-v1' as const, encryptionRequired: true, encryptionKey: key };
+    await runBackup(canister, defaultBackupOptions({ from: writeInput([makeThoughtForm({ id: 'a' })]), ...encrypted }));
+    await runBackup(
+      canister,
+      defaultBackupOptions({
+        from: writeInput([makeThoughtForm({ id: 'b', metadata: { ...makeThoughtForm().metadata, updatedAtMs: 1730000009000 } })]),
+        ...encrypted,
+      })
+    );
+    const [first, second] = Array.from(canister.commits.values());
+    const firstKeys = canister.commitChunkIndex.get(first!.commitId)!;
+    // Serve the first commit's chunks under the second commit's id.
+    canister.commitChunkIndex.set(second!.commitId, firstKeys);
+    second!.manifestHash = first!.manifestHash;
+    const { exitCode } = await runRestore(
+      canister,
+      defaultRestoreOptions({ encryption: 'vetkeys-aes-gcm-v1', decryptionKey: key })
+    );
+    expect(exitCode).toBe(EXIT_INTEGRITY);
   });
 
   it('returns EXIT_VALIDATION when decryption key missing for encrypted data', async () => {
