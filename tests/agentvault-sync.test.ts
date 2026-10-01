@@ -92,7 +92,7 @@ describe('agentvault-sync CLI', () => {
 
 describe('agentvault-sync backup & restore round-trip', () => {
   it('should backup an empty database', () => {
-    const backupPath = join(tempDir, 'backup.jsonl');
+    const backupPath = join(tempDir, 'nested', 'backup.jsonl');
     const output = run(`backup --out ${backupPath}`);
     expect(output).toContain('wrote 0 concepts');
     const lines = readFileSync(backupPath, 'utf-8').trimEnd().split('\n');

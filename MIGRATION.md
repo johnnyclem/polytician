@@ -99,7 +99,7 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 
 - **Make a fresh backup after upgrading.** The 3.0 format (JSONL, `formatVersion: 1`) is different from every 2.x backup file, and 3.0 does not read 2.x files. Your data itself is migrated in place, so the simplest path is: copy the 2.x database, upgrade, start once, then `export_backup` (or `agentvault-sync backup`).
 - **Auto-backup is now off.** If you relied on the 2.x default (every 50 saves), set `POLYTICIAN_BACKUP_THRESHOLD=50`, and `POLYTICIAN_BACKUP_RETAIN` if you want to keep more than 10. The old `backup-*.json` files in `<dataDir>/backups` are not touched or pruned; delete them when you no longer need them (they are plaintext and were created world-readable).
-- **If you set `POLYTICIAN_ENCRYPT` or `--encrypt`,** your 2.x backups were not encrypted. Create a key before upgrading, or every backup will fail with `CONFIG_ERROR`:
+- **If you set `POLYTICIAN_ENCRYPT` or `--encrypt`,** your 2.x backups were not encrypted. Create a key before upgrading, or the server will refuse to start (and the CLI's `--encrypt` backups fail with `CONFIG_ERROR`):
 
   ```bash
   openssl rand -base64 32 > ~/.polytician/backup.key && chmod 600 ~/.polytician/backup.key

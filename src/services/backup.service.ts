@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { getAdapter } from '../db/client.js';
 import type { ConceptRow } from '../db/adapter.js';
@@ -149,6 +149,7 @@ export async function exportBackupTo(
   options: ExportOptions = {}
 ): Promise<ExportResult> {
   const { bytes, result } = await buildBackup(options);
+  mkdirSync(dirname(path), { recursive: true });
   writePrivateFile(path, bytes);
   return { ...result, file: basename(path), path };
 }

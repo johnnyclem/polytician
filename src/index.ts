@@ -8,6 +8,7 @@ import { logger } from './logger.js';
 import { backupService } from './services/backup.service.js';
 import { getConfig } from './config.js';
 import { configureProviders } from './providers/configure.js';
+import { requireBackupKey } from './backup/key.js';
 import type { AgentVaultEventBridge } from './integrations/agent-vault/connectors/event-bridge.js';
 
 async function main(): Promise<void> {
@@ -22,6 +23,9 @@ async function main(): Promise<void> {
   const config = getConfig();
 
   await configureProviders(config);
+
+  // Encryption was requested: refuse to run rather than fail every backup later.
+  if (config.encrypt) requireBackupKey('POLYTICIAN_ENCRYPT');
 
   if (config.agentVault) {
     // Every off-box destination, so operators can see where data may go.
