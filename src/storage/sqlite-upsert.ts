@@ -17,7 +17,7 @@ export interface UpsertResult {
 
 /**
  * Convert a ThoughtFormV1 to the raw text used for embedding generation.
- * Concatenates rawText + entity values, matching the Python sidecar logic.
+ * Concatenates rawText + entity values.
  */
 export function extractEmbeddingText(tf: ThoughtFormV1): string {
   const parts: string[] = [];

@@ -15,21 +15,11 @@ npm-debug.log*
 # TypeScript build output (we build in Docker)
 dist
 
-# Python virtual environments
-python-sidecar/venv
-python-sidecar/.venv
-python-sidecar/__pycache__
-*.pyc
-*.pyo
-*.pyd
-
 # Data files (will be mounted as volume)
 data
 *.db
 *.db-wal
 *.db-shm
-*.index
-id_map.json
 
 # IDE and editor files
 .idea

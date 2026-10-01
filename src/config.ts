@@ -27,12 +27,30 @@ export interface NLPConfig {
 export type DbBackend = 'sqlite' | 'postgres';
 
 /**
- * Configuration for distributed / multi-node deployments.
+ * Default port of the HTTP transport (--http) and of the opt-in stdio health
+ * server. Not 8787, which stenographer's REST daemon uses.
  */
-export interface DistributedConfig {
-  nodeId: string;
-  externalStateUrl: string | null;
-  vectorIndexUrl: string | null;
+export const DEFAULT_HTTP_PORT = 8788;
+
+/** MCP over Streamable HTTP (`--http`); stdio is the default transport. */
+export interface HttpConfig {
+  enabled: boolean;
+  /** Interface to bind (default 127.0.0.1). */
+  host: string;
+  port: number;
+  /**
+   * Bearer token clients must send. From POLYTICIAN_HTTP_TOKEN, else read
+   * from (or generated into) `tokenFile` at startup.
+   */
+  token: string | null;
+  tokenFile: string;
+  /**
+   * Accepted Host header names (DNS-rebinding protection). Defaults to the
+   * loopback names when bound to loopback; required otherwise.
+   */
+  allowedHosts: readonly string[] | null;
+  /** Browser origins allowed to call the server; requests from any other Origin are refused. */
+  allowedOrigins: readonly string[];
 }
 
 /**
@@ -59,9 +77,11 @@ export interface PolyticianConfig {
   embeddingModel: string;
   llm: LLMConfig;
   nlp: NLPConfig;
-  healthPort: number;
-  sidecarUrl: string | null;
-  distributed: DistributedConfig;
+  /** stdio mode only: serve /health on this port (off when null, the default). */
+  healthPort: number | null;
+  /** Interface the stdio-mode health server binds (default 127.0.0.1). */
+  healthHost: string;
+  http: HttpConfig;
   namespaces: NamespaceAllowlist;
   agentVault?: AgentVaultConfig;
   /** Require every backup file to be encrypted (AES-256-GCM with the backup key). */
@@ -154,11 +174,13 @@ export function getConfig(): PolyticianConfig {
   const fileConfig = loadConfigFile();
   const dataDir = process.env['POLYTICIAN_DATA_DIR'] ?? fileConfig.dataDir ?? DEFAULT_DATA_DIR;
 
-  const healthPortRaw =
-    process.env['POLYTICIAN_HEALTH_PORT'] ?? String(fileConfig.healthPort ?? '8787');
-  const sidecarUrl =
-    process.env['POLYTICIAN_SIDECAR_URL'] ?? (fileConfig.sidecarUrl as string | undefined) ?? null;
-  const distFile = (fileConfig as { distributed?: Partial<DistributedConfig> }).distributed ?? {};
+  const file = fileConfig as Record<string, unknown>;
+  const healthPort = parsePort(
+    'POLYTICIAN_HEALTH_PORT',
+    process.env['POLYTICIAN_HEALTH_PORT'] ?? file['healthPort'],
+    null
+  );
+  const http = parseHttpConfig(file, dataDir);
 
   // AgentVault integration config (optional). An invalid configuration is an
   // error: silently dropping it would also drop its egress restrictions.
@@ -221,14 +243,9 @@ export function getConfig(): PolyticianConfig {
       entityTypes: fileConfig.nlp?.entityTypes,
       minConfidence: fileConfig.nlp?.minConfidence,
     },
-    healthPort: parseInt(healthPortRaw, 10) || 8787,
-    sidecarUrl,
-    distributed: {
-      nodeId: process.env['POLYTICIAN_NODE_ID'] ?? distFile.nodeId ?? generateNodeId(),
-      externalStateUrl:
-        process.env['POLYTICIAN_EXTERNAL_STATE_URL'] ?? distFile.externalStateUrl ?? null,
-      vectorIndexUrl: process.env['POLYTICIAN_VECTOR_INDEX_URL'] ?? distFile.vectorIndexUrl ?? null,
-    },
+    healthPort,
+    healthHost: process.env['POLYTICIAN_HEALTH_HOST'] ?? stringOr(file['healthHost'], '127.0.0.1'),
+    http,
     namespaces: parseNamespaces(
       process.env['POLYTICIAN_NAMESPACES'] ?? (fileConfig as Record<string, unknown>).namespaces
     ),
@@ -253,8 +270,81 @@ export function getConfig(): PolyticianConfig {
   return cachedConfig;
 }
 
-function generateNodeId(): string {
-  return `node-${Math.random().toString(36).slice(2, 10)}`;
+const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1', '[::1]'];
+
+/** True when `host` only accepts connections from this machine. */
+function isLoopbackHost(host: string): boolean {
+  return LOOPBACK_HOSTS.includes(host) || host.startsWith('127.');
+}
+
+function stringOr(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+/** Comma-separated string or string array; unset or empty means null. */
+function parseList(raw: unknown): string[] | null {
+  const items = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : null;
+  if (!items) return null;
+  const list = items
+    .filter((v): v is string => typeof v === 'string')
+    .map(v => v.trim())
+    .filter(v => v.length > 0);
+  return list.length > 0 ? list : null;
+}
+
+/** A TCP port 1-65535; unset means `fallback`, anything else invalid is an error. */
+function parsePort<T extends number | null>(name: string, raw: unknown, fallback: T): number | T {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const value = typeof raw === 'number' ? raw : Number(String(raw).trim());
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new ConfigurationError(`${name} must be a port number between 1 and 65535`);
+  }
+  return value;
+}
+
+/**
+ * `--http` (or POLYTICIAN_TRANSPORT=http) selects the HTTP transport. Bound
+ * to a non-loopback interface it needs an explicit Host allowlist, since the
+ * loopback default would refuse every legitimate request.
+ */
+function parseHttpConfig(file: Record<string, unknown>, dataDir: string): HttpConfig {
+  const fileHttp = (file['http'] ?? {}) as Record<string, unknown>;
+  const transport = process.env['POLYTICIAN_TRANSPORT'] ?? file['transport'];
+  if (transport !== undefined && transport !== 'stdio' && transport !== 'http') {
+    throw new ConfigurationError('POLYTICIAN_TRANSPORT (transport) must be stdio or http');
+  }
+  const enabled = process.argv.includes('--http') || transport === 'http';
+  const host = process.env['POLYTICIAN_HTTP_HOST'] ?? stringOr(fileHttp['host'], '127.0.0.1');
+  const port = parsePort(
+    'POLYTICIAN_HTTP_PORT',
+    process.env['POLYTICIAN_HTTP_PORT'] ?? fileHttp['port'],
+    DEFAULT_HTTP_PORT
+  );
+  const configuredHosts = parseList(
+    process.env['POLYTICIAN_HTTP_ALLOWED_HOSTS'] ?? fileHttp['allowedHosts']
+  );
+  const allowedHosts = configuredHosts ?? (isLoopbackHost(host) ? LOOPBACK_HOSTS : null);
+  if (enabled && allowedHosts === null) {
+    throw new ConfigurationError(
+      `POLYTICIAN_HTTP_ALLOWED_HOSTS is required when the HTTP transport binds ${host}: list the host names clients use to reach this server`
+    );
+  }
+  const token = process.env['POLYTICIAN_HTTP_TOKEN'];
+  if (token !== undefined && token.length < 32) {
+    throw new ConfigurationError('POLYTICIAN_HTTP_TOKEN must be at least 32 characters');
+  }
+  return {
+    enabled,
+    host,
+    port,
+    token: token ?? null,
+    tokenFile:
+      process.env['POLYTICIAN_HTTP_TOKEN_FILE'] ??
+      stringOr(fileHttp['tokenFile'], join(dataDir, 'http-token')),
+    allowedHosts,
+    allowedOrigins:
+      parseList(process.env['POLYTICIAN_HTTP_ALLOWED_ORIGINS'] ?? fileHttp['allowedOrigins']) ?? [],
+  };
 }
 
 /** Accepts `'*'`, a comma-separated string, or a string array; anything else means unset. */

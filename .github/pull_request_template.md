@@ -51,7 +51,7 @@ Reference: `docs/polyvault-guardrails.md`
 
 - [ ] Command mode is explicit (`backup|restore|merge|rebase`), not ambiguous `sync`
 - [ ] Repeated sync/backup is idempotent (no duplication/bundle explosion)
-- [ ] Restore cannot leave SQLite/FAISS permanently inconsistent
+- [ ] Restore cannot leave the local database (concepts and vector index) permanently inconsistent
 - [ ] Destructive operations require explicit opt-in (`--force`) and/or confirmation
 - [ ] Partial outcomes are reported with counts (fetched/inserted/updated/skipped/conflicted/failed)
 
@@ -65,7 +65,7 @@ Reference: `docs/polyvault-guardrails.md`
 ### Testing and Compatibility
 
 - [ ] Round-trip tests cover serialize -> store -> fetch -> deserialize fidelity
-- [ ] Failure-path tests cover interruption/chunk loss/corruption/schema mismatch/sidecar unavailable
+- [ ] Failure-path tests cover interruption/chunk loss/corruption/schema mismatch
 - [ ] Integration tests use local replica (not mainnet)
 - [ ] Existing CLI/MCP interfaces remain backward-compatible
 - [ ] No hard-coded canister IDs, network targets, or developer-specific paths

@@ -10,8 +10,8 @@ import { sharedArchivalConnector, type ArchivalConnector } from './archival.conn
 import { logger } from '../../../logger.js';
 
 /**
- * Wires conceptEventBus to AgentVault sync and archival connectors.
- * Follows IndexSyncService's start/stop lifecycle pattern.
+ * Wires conceptEventBus to AgentVault sync and archival connectors
+ * (start() subscribes, stop() unsubscribes).
  */
 export class AgentVaultEventBridge {
   private readonly syncConnector: MemorySyncConnector | null;

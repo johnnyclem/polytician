@@ -87,6 +87,52 @@ describe('MCP tool contract', () => {
     teardownTestDb();
   });
 
+  // --- POLY-10: the only external consumer, AgentVault's polytician-enricher ---
+
+  describe('AgentVault polytician-enricher calls (AgentVault src/orchestration/polytician-enricher.ts)', () => {
+    beforeEach(connect);
+
+    it('gets a validation error naming its unknown arguments when it saves, and nothing is stored', async () => {
+      // saveConceptFromOrchestration(): the arguments it sends, verbatim.
+      const result = await call('save_concept', {
+        name: 'orchestration-session-1',
+        content: '# Orchestration Result: session-1\n\n## Task\nrefactor',
+        representation: 'orchestration_result',
+        metadata: { sessionId: 'session-1', timestamp: '2026-10-01T00:00:00.000Z', filesChangedCount: 2 },
+      });
+      const body = errorBody(result);
+      for (const key of ['name', 'content', 'representation', 'metadata']) {
+        expect(body.text).toContain(`'${key}'`);
+      }
+      expect((await conceptService.getStats()).conceptCount).toBe(0);
+    });
+
+    it('gets a validation error for limit/min_score instead of silently searching with defaults', async () => {
+      // enrichWithPolyticianContext(): { query, limit: topK, min_score: minRelevanceScore }.
+      const body = errorBody(
+        await call('search_concepts', { query: 'refactor the parser', limit: 5, min_score: 0.3 })
+      );
+      expect(body.text).toContain(`'limit'`);
+      expect(body.text).toContain(`'min_score'`);
+    });
+
+    it('succeeds with the documented contract: markdown + tags to save, k to search, JSON in content[0].text', async () => {
+      const saved = await ok<{ id: string }>('save_concept', {
+        markdown: '# Orchestration Result: session-1\n\n## Task\nrefactor the parser',
+        tags: ['orchestration', 'session:session-1'],
+      });
+      const hits = await ok<Array<{ id: string; score: number }>>('search_concepts', {
+        query: 'refactor the parser',
+        k: 5,
+      });
+      expect(hits[0]!.id).toBe(saved.id);
+      expect(hits[0]!.score).toBeGreaterThan(0.3);
+      // read_concept { id } is already valid; the concept text is `markdown`.
+      const read = await ok<{ id: string; markdown: string }>('read_concept', { id: saved.id });
+      expect(read.markdown).toContain('refactor the parser');
+    });
+  });
+
   describe('strict input schemas', () => {
     beforeEach(connect);
 

@@ -1,0 +1,63 @@
+# Only labelled clients reach Polytician, only Polytician reaches Postgres.
+# Requires a CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: polytician-ingress
+  namespace: polytician
+spec:
+  podSelector:
+    matchLabels:
+      app: polytician
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        # Pods labelled polytician-client: "true" in any namespace.
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              polytician-client: "true"
+      ports:
+        - port: 8788
+          protocol: TCP
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # HTTPS to huggingface.co for the first download of the embedding model.
+    # Remove this rule if the model is pre-seeded into /data/models.
+    - ports:
+        - port: 443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: polytician
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: polytician
+      ports:
+        - port: 5432
+          protocol: TCP
+  egress: []

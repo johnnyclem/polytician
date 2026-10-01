@@ -19,7 +19,7 @@ All PolyVault work must satisfy this policy before merge.
 These invariants must hold in all environments unless a command explicitly documents otherwise.
 
 - `backup` is idempotent: repeated runs with unchanged source state do not duplicate records or bloat bundles.
-- `restore` is system-consistent: SQLite and FAISS end in a matched state, or rollback/recovery is applied.
+- `restore` is system-consistent: the concepts table and its vector index end in a matched state, or rollback/recovery is applied.
 - Sensitive mode never persists plaintext `rawText` on-chain by default.
 - Encryption-required mode never uploads plaintext if encryption is unavailable.
 - Bundle metadata is advisory until validated against configured principal/canister/network.
@@ -86,7 +86,7 @@ Must:
 - Chunk large uploads before ingress/stable-memory limits are exceeded.
 - Use streaming/chunking for serialization where feasible instead of full-table memory loads.
 - Gate compression behind size thresholds.
-- Batch FAISS rebuild work to avoid rebuild-per-delta loops.
+- Batch re-embedding work to avoid embed-per-delta loops.
 - Provide progress, timeout, and cancellation for long interactive operations.
 
 Must not:
@@ -103,7 +103,7 @@ Must:
 - Require verified snapshot + explicit confirmation before destructive local reset/truncate actions.
 - Securely clean up temporary sensitive artifacts.
 - Emit explicit per-run result accounting and failure reasons.
-- Fail gracefully when sidecars/services are unavailable.
+- Fail gracefully when external services are unavailable.
 
 Must not:
 
@@ -142,7 +142,7 @@ Must not:
 
 Out of scope for initial integration unless separately approved:
 
-- On-chain vector indexing/semantic search (FAISS remains local).
+- On-chain vector indexing/semantic search (the vector index remains local).
 - Claims of immutable snapshots unless canister guarantees immutability.
 - Multi-agent orchestration beyond defined roadmap.
 - Generalized VCS beyond MemoryRepo needs.
@@ -161,9 +161,9 @@ A PolyVault change is done only when all gates below pass.
   - corrupted bundle payload,
   - schema/version mismatch,
   - identity mismatch,
-  - sidecar unreachable.
+  - canister unreachable.
 - Idempotency tests pass for repeated backup/sync runs.
-- Restore consistency tests prove no permanent SQLite/FAISS mismatch after failure.
+- Restore consistency tests prove no permanent mismatch between concepts and their vector index after failure.
 - Integration tests run against local replica, not mainnet.
 
 ### B. Security Gates
@@ -213,7 +213,7 @@ Do not release if any condition below is true:
 - ThoughtForms can be silently lost or overwritten during merge/restore.
 - Sensitive plaintext can be stored on-chain when encryption is expected.
 - Repeated syncs duplicate concepts or grow bundles unexpectedly.
-- SQLite/FAISS consistency can be left mismatched without recovery.
+- Concepts and their vector index can be left mismatched without recovery.
 - Upload path can exceed canister constraints without preemptive chunking.
 - Implementation depends on hard-coded environment values or local developer paths.
 - Changes cannot be reasonably upstreamed due to invasive design.

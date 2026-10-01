@@ -83,6 +83,10 @@ A `save_concept` create must include at least one of `markdown`, `thoughtform` o
 - `vault_restore` is gone. Put the backup file in `<dataDir>/backups` and call `import_backup { file: "<name>" }`. Inline bundles and arbitrary paths are no longer accepted.
 - `import_backup` keeps a local concept that is as new as or newer than the backup copy (`onConflict: "newer"`), where `vault_restore` overwrote it. Pass `onConflict: "overwrite"` to restore over newer local edits.
 
+### AgentVault's `polytician-enricher`
+
+Its calls never matched these tools: in 2.x they stored empty concepts and found nothing; in 3.0 they fail with `Input validation error: ... Unrecognized key(s)`. Change `save_concept { name, content, representation, metadata }` to `save_concept { markdown: content, tags: [...] }`, `search_concepts { query, limit, min_score }` to `search_concepts { query, k: limit }` and filter on `score` client-side, and parse results from `content[0].text` (there is no `content[0].data`). The README section "Calling Polytician from AgentVault's orchestrator" has the full contract.
+
 ### Embedding model changes
 
 A search over a namespace holding vectors made by another embedding model fails with `EMBEDDING_MODEL_MISMATCH`. Run `reembed_concepts { namespace }` (repeat while `remaining` > 0; add `overwrite: true` to also replace vectors your client supplied, and re-save or delete concepts reported as `no-text`).
@@ -93,6 +97,10 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 
 ## Operators
 
+- **Health endpoint.** A stdio server no longer opens a port. If a monitor or AgentVault's packaging probes `http://localhost:8787/health`, set `POLYTICIAN_HEALTH_PORT` (8788 is the suite default; 8787 is stenographer's) and point the probe at it; it binds `127.0.0.1` unless `POLYTICIAN_HEALTH_HOST` says otherwise. Use `/health/live` for liveness and `/health` for readiness. Parse `checks.database` / `checks.vector_index`; `checks.sidecar` and error messages are gone.
+- **Python sidecar.** Delete the sidecar service, `POLYTICIAN_SIDECAR_URL`, and any `python-sidecar` image or `k8s/sidecar.yml` deployment. Nothing replaces it: search never used its FAISS index.
+- **Remove `POLYTICIAN_NODE_ID`, `POLYTICIAN_EXTERNAL_STATE_URL` and `POLYTICIAN_VECTOR_INDEX_URL`** (`distributed.*`). They were never read.
+- **Docker / compose / Kubernetes.** Rebuild the image: it now serves MCP over HTTP on port 8788 with data in `/data`. Clients need `Authorization: Bearer <POLYTICIAN_HTTP_TOKEN>`. For compose, export `POSTGRES_PASSWORD` and `POLYTICIAN_HTTP_TOKEN` (there is no default password; an existing `pgdata` volume keeps the password it was created with, so reuse `changeme` for it or change the role's password first), and use the single `polytician` service. Postgres is no longer published on the host. For Kubernetes, create `postgres-secret` and `polytician-http` (commands in the manifests), set the image, change Service/probe ports from 8787 to 8788, apply `k8s/networkpolicy.yml`, and label client pods `polytician-client: "true"`.
 - Remove `POLYTICIAN_ASYNC_INDEX_SYNC` / `distributed.asyncIndexSync`; it no longer exists. Writes update the row and its vector in one transaction, so nothing needs syncing.
 - **Move your config file.** `.polytician.json` in the working directory and `~/.polytician.json` are no longer read. Move the file to `~/.polytician/config.json`, or start the server with `--config /path/to/file.json`. Check it is valid JSON: an unparseable file now stops the server.
 - **`${VAR}` in config values** may only name `POLYTICIAN_*` variables. Rename, for example `"apiToken": "${AV_TOKEN}"` → `"${POLYTICIAN_AV_TOKEN}"` and export that variable. Do not put `${...}` in `POLYTICIAN_AV_API_TOKEN`; it is used literally.
@@ -122,8 +130,9 @@ Service errors are returned as `{ "error": "...", "code": "..." }` (with `isErro
 - `read(id, reps, { namespace })` and `delete(id, { namespace })` check the namespace when given. Omitting it keeps the unchecked, trusted behaviour for in-process callers.
 - `save()` accepts `autoEmbed` (default `false` at the service level), `derived` and `overwrite`, and throws `ValidationError`, `NamespaceDeniedError` and `OverwriteRefusedError` in addition to `VersionConflictError`. `saveBatch(entries, { autoEmbed, batchSize })` is atomic.
 - Custom `DatabaseAdapter` implementations must add `applyWrites(writes)`, which applies inserts, conditional updates (`WHERE version = expectedVersion`) and deletes atomically, keeping the vector index in step. They must also accept `vectorSearch(query, k, { namespaces, tags })` with the filters applied inside the KNN query and `distance` as cosine distance, and `upsertVector(id, namespace, embedding)`.
-- `IndexSyncService` only keeps `rebuildAfterDeserialize()`; `start()`, `stop()`, `waitForPending()` and `pendingCount` were removed.
+- `IndexSyncService` (`src/services/index-sync.service.ts`), `rebuildFaissIndex` (`src/sidecar/faiss.ts`) and the PolyVault FAISS client (`src/lib/polyvault/faiss-client.ts`) are removed. Call `runRestoreE2E(client, db, options)` without the FAISS client, and drop `faissMode` and `result.faiss`.
 - Custom `DatabaseAdapter` implementations must also store `embedding_model` with each vector and implement `countForeignVectors(model, namespaces)`, `findForeignVectors(model, namespace, afterId, limit)` and `labelLegacyVectors(model)`.
+- `PolyticianConfig` lost `sidecarUrl` and `distributed`; `healthPort` is `number | null`, and `healthHost` and `http` were added.
 - `SummarizeOptions.neighborDistances` is now `neighborScores`, with the same `[0, 1]` scores as search.
 - `encryptBundle` and `decryptBundle` (`src/storage/thoughtform.ts`) were removed; they returned their input unchanged. Backup encryption lives in `src/backup/format.ts`.
 - `BackupService.runBackup()` writes the JSONL format and returns the file path; `exportBackup`, `importBackup` and `importBackupBytes` in `src/services/backup.service.ts` are the export/import entry points.

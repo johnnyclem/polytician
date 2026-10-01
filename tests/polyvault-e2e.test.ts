@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { runRestoreE2E, runBackupE2E, type RestoreE2EOptions, type BackupE2EOptions } from '../src/commands/polyvault/e2e.js';
 import type { RestoreClient, CommitRecord, ChunkRecord } from '../src/lib/polyvault/download.js';
 import type { CanisterResult, CanisterClient, FinalizeResult, PutChunkRequest } from '../src/lib/polyvault/upload.js';
-import type { FaissRebuildClient, FaissRebuildResult, FaissRebuildMode } from '../src/lib/polyvault/faiss-client.js';
 import type { DatabaseAdapter, ConceptRow, ListRow, VectorResult, ConceptMetaRow, StatsResult } from '../src/db/adapter.js';
 import type { ThoughtFormV1 } from '../src/schemas/thoughtform.js';
 import { serializeBundle } from '../src/polyvault/serializer.js';
@@ -100,19 +99,6 @@ class InMemoryDbAdapter implements DatabaseAdapter {
   // Test helpers
   getAll(): ConceptRow[] { return Array.from(this.concepts.values()); }
   count(): number { return this.concepts.size; }
-}
-
-// --- Mock FAISS client ---
-
-function createMockFaissClient(): FaissRebuildClient & { calls: Array<{ thoughtforms: ThoughtFormV1[]; mode: FaissRebuildMode }> } {
-  const calls: Array<{ thoughtforms: ThoughtFormV1[]; mode: FaissRebuildMode }> = [];
-  return {
-    calls,
-    async rebuildIndex(thoughtforms: ThoughtFormV1[], mode: FaissRebuildMode): Promise<FaissRebuildResult> {
-      calls.push({ thoughtforms, mode });
-      return { rebuilt: true, vectorCount: thoughtforms.length };
-    },
-  };
 }
 
 // --- Mock restore client that serves pre-built bundles ---
@@ -226,14 +212,13 @@ describe('PolyVault E2E Restore', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('restores ThoughtForms into SQLite and triggers FAISS rebuild', async () => {
+  it('restores ThoughtForms into SQLite', async () => {
     const tf1 = makeThoughtForm('tf_1', 1730000000001, 'first concept');
     const tf2 = makeThoughtForm('tf_2', 1730000000002, 'second concept');
 
     const bundle = buildBundleChunks([tf1, tf2]);
     const client = createMockRestoreClient([bundle]);
     const db = new InMemoryDbAdapter();
-    const faiss = createMockFaissClient();
 
     const outPath = join(tmpDir, 'restored.json');
     const options: RestoreE2EOptions = {
@@ -242,10 +227,9 @@ describe('PolyVault E2E Restore', () => {
       compression: 'none',
       encryption: 'none',
       sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
     };
 
-    const { result, exitCode } = await runRestoreE2E(client, db, faiss, options);
+    const { result, exitCode } = await runRestoreE2E(client, db, options);
 
     expect(exitCode).toBe(0);
     expect(result.restore.status).toBe('ok');
@@ -256,19 +240,11 @@ describe('PolyVault E2E Restore', () => {
     expect(result.upsert!.totalProcessed).toBe(2);
     expect(result.upsert!.inserted).toBe(2);
     expect(db.count()).toBe(2);
-
-    // FAISS rebuild was called
-    expect(result.faiss).not.toBeNull();
-    expect(result.faiss!.rebuilt).toBe(true);
-    expect(result.faiss!.vectorCount).toBe(2);
-    expect(faiss.calls).toHaveLength(1);
-    expect(faiss.calls[0]!.mode).toBe('replace');
   });
 
   it('handles empty restore (no commits)', async () => {
     const client = createMockRestoreClient([]);
     const db = new InMemoryDbAdapter();
-    const faiss = createMockFaissClient();
 
     const outPath = join(tmpDir, 'empty.json');
     const options: RestoreE2EOptions = {
@@ -277,40 +253,14 @@ describe('PolyVault E2E Restore', () => {
       compression: 'none',
       encryption: 'none',
       sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
     };
 
-    const { result, exitCode } = await runRestoreE2E(client, db, faiss, options);
+    const { result, exitCode } = await runRestoreE2E(client, db, options);
 
     expect(exitCode).toBe(0);
     expect(result.restore.status).toBe('empty');
     expect(result.upsert).toBeNull();
-    expect(result.faiss).toBeNull();
     expect(db.count()).toBe(0);
-    expect(faiss.calls).toHaveLength(0);
-  });
-
-  it('skips FAISS rebuild when no faiss client provided', async () => {
-    const tf = makeThoughtForm('tf_solo', 1730000000001, 'solo');
-    const bundle = buildBundleChunks([tf]);
-    const client = createMockRestoreClient([bundle]);
-    const db = new InMemoryDbAdapter();
-
-    const outPath = join(tmpDir, 'no-faiss.json');
-    const options: RestoreE2EOptions = {
-      to: outPath,
-      mode: 'full',
-      compression: 'none',
-      encryption: 'none',
-      sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
-    };
-
-    const { result, exitCode } = await runRestoreE2E(client, db, null, options);
-
-    expect(exitCode).toBe(0);
-    expect(result.upsert!.inserted).toBe(1);
-    expect(result.faiss).toBeNull();
   });
 
   it('idempotent restore does not duplicate rows', async () => {
@@ -326,15 +276,14 @@ describe('PolyVault E2E Restore', () => {
       compression: 'none',
       encryption: 'none',
       sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
     };
 
     // First restore
-    await runRestoreE2E(client, db, null, options);
+    await runRestoreE2E(client, db, options);
     expect(db.count()).toBe(1);
 
     // Second restore — same data, idempotent (equal timestamps → update, not skip)
-    const { result } = await runRestoreE2E(client, db, null, options);
+    const { result } = await runRestoreE2E(client, db, options);
     expect(db.count()).toBe(1);
     expect(result.upsert!.updated).toBe(1);
     expect(result.upsert!.inserted).toBe(0);
@@ -355,10 +304,9 @@ describe('PolyVault E2E Restore', () => {
       compression: 'none',
       encryption: 'none',
       sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
     };
 
-    await runRestoreE2E(oldClient, db, null, options);
+    await runRestoreE2E(oldClient, db, options);
     expect(db.count()).toBe(1);
     const v1 = db.findConcept('tf_update');
     expect(v1?.markdown).toBe('old text');
@@ -368,7 +316,7 @@ describe('PolyVault E2E Restore', () => {
     const newBundle = buildBundleChunks([newTf]);
     const newClient = createMockRestoreClient([newBundle]);
 
-    const { result } = await runRestoreE2E(newClient, db, null, options);
+    const { result } = await runRestoreE2E(newClient, db, options);
     expect(result.upsert!.updated).toBe(1);
     const v2 = db.findConcept('tf_update');
     expect(v2?.markdown).toBe('new text');
@@ -389,17 +337,16 @@ describe('PolyVault E2E Restore', () => {
       compression: 'none',
       encryption: 'none',
       sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
     };
 
-    await runRestoreE2E(localClient, db, null, options);
+    await runRestoreE2E(localClient, db, options);
 
     // Try to restore older remote version
     const remoteTf = makeThoughtForm('tf_local', 1730000000001, 'remote older');
     const remoteBundle = buildBundleChunks([remoteTf]);
     const remoteClient = createMockRestoreClient([remoteBundle]);
 
-    const { result } = await runRestoreE2E(remoteClient, db, null, options);
+    const { result } = await runRestoreE2E(remoteClient, db, options);
     expect(result.upsert!.skipped).toBe(1);
     const concept = db.findConcept('tf_local');
     expect(concept?.markdown).toBe('local latest');
@@ -420,46 +367,14 @@ describe('PolyVault E2E Restore', () => {
       compression: 'none',
       encryption: 'none',
       sinceCommitCreatedAtMs: 2000, // After the commit timestamp
-      faissMode: 'upsert',
     };
 
-    const { result, exitCode } = await runRestoreE2E(client, db, null, options);
+    const { result, exitCode } = await runRestoreE2E(client, db, options);
     expect(exitCode).toBe(0);
     expect(result.restore.status).toBe('empty');
     expect(db.count()).toBe(0);
   });
 
-  it('handles FAISS rebuild failure gracefully', async () => {
-    const tf = makeThoughtForm('tf_faiss_fail', 1730000000001);
-    const bundle = buildBundleChunks([tf]);
-    const client = createMockRestoreClient([bundle]);
-    const db = new InMemoryDbAdapter();
-
-    const failingFaiss: FaissRebuildClient = {
-      async rebuildIndex(): Promise<FaissRebuildResult> {
-        throw new Error('Sidecar unreachable');
-      },
-    };
-
-    const outPath = join(tmpDir, 'faiss-fail.json');
-    const options: RestoreE2EOptions = {
-      to: outPath,
-      mode: 'full',
-      compression: 'none',
-      encryption: 'none',
-      sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
-    };
-
-    const { result, exitCode } = await runRestoreE2E(client, db, failingFaiss, options);
-
-    // SQLite upsert succeeded, but FAISS failed
-    expect(exitCode).toBe(4);
-    expect(result.upsert).not.toBeNull();
-    expect(result.upsert!.inserted).toBe(1);
-    expect(result.faiss).toBeNull();
-    expect(db.count()).toBe(1);
-  });
 });
 
 describe('PolyVault E2E Backup', () => {
@@ -628,7 +543,6 @@ describe('PolyVault E2E roundtrip', () => {
     const bundle = buildBundleChunks([tf1, tf2]);
     const restoreClient = createMockRestoreClient([bundle]);
     const db = new InMemoryDbAdapter();
-    const faiss = createMockFaissClient();
 
     const outPath = join(tmpDir, 'roundtrip.json');
     const options: RestoreE2EOptions = {
@@ -637,10 +551,9 @@ describe('PolyVault E2E roundtrip', () => {
       compression: 'none',
       encryption: 'none',
       sinceCommitCreatedAtMs: 0,
-      faissMode: 'replace',
     };
 
-    const { result, exitCode } = await runRestoreE2E(restoreClient, db, faiss, options);
+    const { result, exitCode } = await runRestoreE2E(restoreClient, db, options);
 
     expect(exitCode).toBe(0);
     expect(db.count()).toBe(2);
@@ -655,15 +568,10 @@ describe('PolyVault E2E roundtrip', () => {
     expect(c2).not.toBeNull();
     const parsed2 = JSON.parse(c2!.thoughtform!) as ThoughtFormV1;
     expect(parsed2.rawText).toBe('roundtrip two');
-
-    // FAISS was rebuilt with both ThoughtForms
-    expect(faiss.calls).toHaveLength(1);
-    expect(faiss.calls[0]!.thoughtforms).toHaveLength(2);
   });
 
-  it('incremental upsert FAISS mode works on second restore', async () => {
+  it('a second restore adds to the first', async () => {
     const db = new InMemoryDbAdapter();
-    const faiss = createMockFaissClient();
 
     // First restore
     const tf1 = makeThoughtForm('tf_inc1', 1730000000001, 'first batch');
@@ -673,26 +581,23 @@ describe('PolyVault E2E roundtrip', () => {
     const outPath = join(tmpDir, 'incremental.json');
     const fullOpts: RestoreE2EOptions = {
       to: outPath, mode: 'full', compression: 'none', encryption: 'none',
-      sinceCommitCreatedAtMs: 0, faissMode: 'replace',
+      sinceCommitCreatedAtMs: 0,
     };
 
-    await runRestoreE2E(client1, db, faiss, fullOpts);
-    expect(faiss.calls).toHaveLength(1);
-    expect(faiss.calls[0]!.mode).toBe('replace');
+    await runRestoreE2E(client1, db, fullOpts);
+    expect(db.count()).toBe(1);
 
-    // Second restore with upsert mode
+    // Second restore
     const tf2 = makeThoughtForm('tf_inc2', 1730000000002, 'second batch');
     const bundle2 = buildBundleChunks([tf2]);
     const client2 = createMockRestoreClient([bundle2]);
 
-    const upsertOpts: RestoreE2EOptions = {
+    const secondOpts: RestoreE2EOptions = {
       to: outPath, mode: 'full', compression: 'none', encryption: 'none',
-      sinceCommitCreatedAtMs: 0, faissMode: 'upsert',
+      sinceCommitCreatedAtMs: 0,
     };
 
-    await runRestoreE2E(client2, db, faiss, upsertOpts);
-    expect(faiss.calls).toHaveLength(2);
-    expect(faiss.calls[1]!.mode).toBe('upsert');
+    await runRestoreE2E(client2, db, secondOpts);
     expect(db.count()).toBe(2);
   });
 });

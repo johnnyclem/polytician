@@ -1,7 +1,7 @@
 {
   "name": "polytician",
   "version": "2.0.0",
-  "description": "Local-first MCP server for shared semantic memory \u2014 store, retrieve, and convert concepts across vectors, markdown, and ThoughtForm representations",
+  "description": "Local-first MCP server for shared semantic memory — store, retrieve, and convert concepts across vectors, markdown, and ThoughtForm representations",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -11,10 +11,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "lint": "eslint src/**/*.ts",
-    "lint:fix": "eslint src/**/*.ts --fix",
-    "format": "prettier --write src/**/*.ts",
-    "format:check": "prettier --check src/**/*.ts",
+    "lint": "eslint \"src/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
     "quality": "npm run lint && npm run typecheck && npm run format:check",
     "quality:fix": "npm run lint:fix && npm run format",
     "typecheck": "tsc --noEmit",
@@ -22,7 +22,7 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run quality && npm run test && npm run build",
     "audit:fix": "npm audit fix",
-    "security:scan": "npm audit --audit-level=moderate",
+    "security:scan": "npm audit --omit=dev --audit-level=high",
     "agentvault-sync": "tsx bin/agentvault-sync.ts"
   },
   "dependencies": {

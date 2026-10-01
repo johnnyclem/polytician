@@ -17,7 +17,7 @@ Local SQLite   -->  Backup Pipeline  -->  IC Canister
 (ThoughtForms)     (serialize/compress/    (chunked storage)
                     encrypt/chunk/upload)
 
-IC Canister    -->  Restore Pipeline -->  Local SQLite + FAISS
+IC Canister    -->  Restore Pipeline -->  Local SQLite
 (chunked storage)  (fetch/reassemble/     (concepts table + vector index)
                     decrypt/decompress)
 ```
@@ -27,7 +27,7 @@ IC Canister    -->  Restore Pipeline -->  Local SQLite + FAISS
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
 | Core | `src/polyvault/` | Pure functions: serialization, chunking, crypto, conflict resolution |
-| Lib | `src/lib/polyvault/` | Integration: upload, download, validation, FAISS client |
+| Lib | `src/lib/polyvault/` | Integration: upload, download, validation |
 | Commands | `src/commands/polyvault/` | CLI orchestration: backup, restore, end-to-end pipelines |
 
 ## Data Schemas
@@ -85,8 +85,7 @@ Transport envelope for backup/restore. Contains a commit record, manifest, delta
 4. Decrypt (if encrypted; the nonce is read from the payload) and decompress
 5. Deserialize and schema validate
 6. Deduplicate by ID (last-writer-wins by `updatedAtMs`)
-7. Upsert into SQLite (local-first: newer local data preserved)
-8. Trigger FAISS index rebuild
+7. Upsert into SQLite (local-first: newer local data preserved). Upserted concepts carry no vector until one is derived for them (3.0 removed the FAISS rebuild step, whose index nothing queried)
 
 ### Rebase (remote commits onto the local set)
 

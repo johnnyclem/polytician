@@ -1,13 +1,10 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: postgres-secret
-  namespace: polytician
-type: Opaque
-stringData:
-  POSTGRES_PASSWORD: changeme
-  POSTGRES_URL: postgresql://polytician:changeme@postgres:5432/polytician
----
+# Postgres + pgvector for Polytician.
+#
+# The credentials are not committed. Create them first, e.g.:
+#   PW=$(openssl rand -hex 24)
+#   kubectl -n polytician create secret generic postgres-secret \
+#     --from-literal=POSTGRES_PASSWORD="$PW" \
+#     --from-literal=POSTGRES_URL="postgresql://polytician:$PW@postgres:5432/polytician"
 apiVersion: v1
 kind: Service
 metadata:
@@ -37,9 +34,17 @@ spec:
       labels:
         app: postgres
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: postgres
-          image: pgvector/pgvector:pg16
+          image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
           env:
             - name: POSTGRES_DB
               value: polytician
@@ -50,14 +55,23 @@ spec:
                 secretKeyRef:
                   name: postgres-secret
                   key: POSTGRES_PASSWORD
+            # A subdirectory, so initdb does not trip over the volume's lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           ports:
             - containerPort: 5432
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           volumeMounts:
             - name: pgdata
               mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "polytician"]
+              command: ["pg_isready", "-U", "polytician", "-d", "polytician"]
             initialDelaySeconds: 5
             periodSeconds: 5
           resources:
@@ -67,6 +81,9 @@ spec:
             limits:
               memory: 1Gi
               cpu: "1"
+      volumes:
+        - name: run
+          emptyDir: {}
   volumeClaimTemplates:
     - metadata:
         name: pgdata
