@@ -15,6 +15,7 @@ Each change is listed once. Everything under **Removed**, and every **Security**
 **Runtime and storage**
 
 - **Node.js 22 or newer** (POLY-31). `engines.node` is `>=22` (Node 20 reached end of life in April 2026); CI runs Node 22 and 24, and the Docker image uses `node:22-bookworm-slim`.
+- **better-sqlite3 13** (from 11). better-sqlite3 11 aborts the process on Node 24 when a worker or process tears down an open statement (`RemoveEnvironmentCleanupHook` assertion in `Statement::~Statement`); 13 requires Node 22 or newer, which matches the new floor.
 - **`@huggingface/transformers` 4.x replaces `@xenova/transformers` 2.x** (POLY-31). The default model (`Xenova/all-MiniLM-L6-v2`, quantized `q8`) is unchanged. `POLYTICIAN_EMBEDDING_MODEL` must name a model `@huggingface/transformers` can load.
 - **An embedding model must produce 384-dimensional vectors** (POLY-27). 2.x silently truncated a larger model's output to 384 components; 3.0 fails the embedding with an error naming both sizes.
 - **Each vector records its embedding model, and search refuses to mix models** (POLY-27). `concepts.embedding_model` holds the configured model when the vector was written. A search over namespaces holding vectors from another model fails with `EMBEDDING_MODEL_MISMATCH` (in 2.x, changing `POLYTICIAN_EMBEDDING_MODEL` silently produced meaningless rankings); the new `reembed_concepts` tool re-derives them. Vectors from 2.x are labelled with the model configured on the first 3.0 start.

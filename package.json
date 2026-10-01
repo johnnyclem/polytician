@@ -29,7 +29,7 @@
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^13.0.3",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.19.0",
     "sqlite-vec": "^0.1.7-alpha.2",
@@ -37,7 +37,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.18.0",
     "@types/uuid": "^10.0.0",
