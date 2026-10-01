@@ -34,6 +34,7 @@ import {
   SearchConceptsOut,
 } from './mcp/output-schemas.js';
 import { registerBackupTools } from './mcp/tools/backup.js';
+import { POLYTICIAN_VERSION } from './version.js';
 
 const namespaceArg = NamespaceSchema.optional().describe(
   'Namespace (default: "default"). Must be in POLYTICIAN_NAMESPACES when the operator set one.'
@@ -99,7 +100,7 @@ const READ_ONLY: ToolAnnotations = {
 export async function createServer(): Promise<McpServer> {
   const server = new McpServer({
     name: 'polytician',
-    version: '2.0.0',
+    version: POLYTICIAN_VERSION,
   });
   useCodedToolErrors(server);
 

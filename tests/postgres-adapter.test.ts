@@ -6,7 +6,11 @@
  *   POLYTICIAN_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/polytest npx vitest run tests/postgres-adapter.test.ts
  * The tests drop and recreate Polytician's tables in that database.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished } from 'vitest';
+import { execSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import pg from 'pg';
 import { initializeDatabaseAsync, closeDatabase, resetAdapter } from '../src/db/client.js';
 import { getConfig, resetConfig } from '../src/config.js';
@@ -230,4 +234,42 @@ describe.skipIf(!PG_URL)('PostgresAdapter (pgvector)', () => {
     expect((await service.list({ tags: ['physics'] })).total).toBe(1);
     expect((await service.list({ tags: ['50%_"off"'] })).total).toBe(1);
   });
+
+  // --- The agentvault-sync CLI on Postgres (the Compose / Kubernetes backend) ---
+
+  it('backs up and restores a Postgres store with the agentvault-sync CLI', async () => {
+    await open();
+    const a = await service.save({ embedding: vec(7), markdown: 'a', namespace: 'default' });
+    const b = await service.save({ markdown: 'b', tags: ['t'], namespace: 'work' });
+    await closeDatabase();
+    resetAdapter();
+
+    const dataDir = mkdtempSync(join(tmpdir(), 'pg-cli-'));
+    onTestFinished(() => rmSync(dataDir, { recursive: true, force: true }));
+    const file = join(dataDir, 'drill.jsonl');
+    const cli = (args: string): string =>
+      execSync(`npx tsx bin/agentvault-sync.ts ${args}`, {
+        cwd: join(import.meta.dirname, '..'),
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          POLYTICIAN_DATA_DIR: dataDir,
+          POLYTICIAN_DB_BACKEND: 'postgres',
+          POLYTICIAN_POSTGRES_URL: PG_URL!,
+        },
+        timeout: 60_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+    expect(cli(`backup --out ${file}`)).toContain('wrote 2 concepts (default=1, work=1)');
+    await dropAll();
+    expect(cli(`restore --file ${file}`)).toContain('imported 2 concepts (2 new, 0 replaced)');
+
+    await open();
+    expect(await service.read(b.id, undefined, { namespace: 'work' })).toMatchObject({
+      markdown: 'b',
+      tags: ['t'],
+    });
+    expect((await service.search(vec(7), 5)).map(r => r.id)).toEqual([a.id]);
+  }, 60_000);
 });

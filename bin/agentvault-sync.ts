@@ -21,7 +21,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { initializeDatabase, closeDatabase, getAdapter } from '../src/db/client.js';
+import { initializeDatabaseAsync, closeDatabase, getAdapter } from '../src/db/client.js';
 import { getConfig } from '../src/config.js';
 import {
   exportBackup,
@@ -215,8 +215,8 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Initialize database before any operation
-  initializeDatabase();
+  // Initialize database before any operation (async: Postgres needs it)
+  await initializeDatabaseAsync();
 
   let exitCode = 0;
   try {

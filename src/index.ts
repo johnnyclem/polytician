@@ -10,6 +10,7 @@ import { backupService } from './services/backup.service.js';
 import { getConfig } from './config.js';
 import { configureProviders } from './providers/configure.js';
 import { requireBackupKey } from './backup/key.js';
+import { POLYTICIAN_VERSION } from './version.js';
 import {
   loadOrCreateHttpToken,
   startHttpServer,
@@ -105,6 +106,7 @@ async function main(): Promise<void> {
       allowedOrigins,
     });
     logger.info('mcp server listening', {
+      version: POLYTICIAN_VERSION,
       transport: 'http',
       url: `${httpServer.url}/mcp`,
       token: config.http.token ? 'POLYTICIAN_HTTP_TOKEN' : config.http.tokenFile,
@@ -117,7 +119,7 @@ async function main(): Promise<void> {
   const server = await createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info('mcp server connected', { transport: 'stdio' });
+  logger.info('mcp server connected', { version: POLYTICIAN_VERSION, transport: 'stdio' });
 
   // The client closing our stdin means it is gone: exit rather than linger
   // as an orphan holding the database (and the health port, if enabled).

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { vi } from 'vitest';
 import { VECTOR_DIMENSION } from '../src/types/concept.js';
@@ -75,6 +76,13 @@ describe('MCP Server — Tool integration', () => {
   });
 
   // --- Tool discovery ---
+
+  it('reports the package version as its MCP server version', async () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+    expect(client.getServerVersion()).toMatchObject({ name: 'polytician', version: pkg.version });
+  });
 
   it('should list all expected tools', async () => {
     const { tools } = await client.listTools();
