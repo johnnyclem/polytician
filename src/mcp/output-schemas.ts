@@ -30,7 +30,8 @@ export const ConceptOut = z
     updatedAt: z.number(),
     tags: z.array(z.string()),
     markdown: z.string().nullable().optional(),
-    thoughtform: z.record(z.string(), z.unknown()).nullable().optional(),
+    // A ThoughtForm object; rows from 2.x may hold any JSON value.
+    thoughtform: z.unknown().optional(),
     embedding: z.array(z.number()).nullable().optional(),
     provenance: ProvenanceMapSchema,
     assertionStatus: AssertionStatusSchema.nullable(),

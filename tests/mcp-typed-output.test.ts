@@ -24,6 +24,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createServer } from '../src/server.js';
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
 import { resetConfig } from '../src/config.js';
+import { getAdapter } from '../src/db/client.js';
 import { registerVaultTools } from '../src/integrations/agent-vault/tools/vault-tools.js';
 import { AgentVaultConfigSchema } from '../src/integrations/agent-vault/config.js';
 
@@ -148,6 +149,19 @@ describe('structured results', () => {
     await ok('import_backup', { file: exported['file'] as string });
     expect(await ok('delete_concept', { id })).toEqual({ deleted: id });
   });
+
+  it('still reads rows from 2.x with free-form thoughtforms and unreadable provenance', async () => {
+    const saved = await ok('save_concept', { markdown: 'legacy' });
+    const id = saved['id'] as string;
+    // 2.x stored any JSON as a thoughtform; provenance written by hand or a bug.
+    await getAdapter().updateConcept(id, {
+      thoughtform: JSON.stringify('a bare string'),
+      provenance: JSON.stringify({ markdown: { from: 'thoughtform' }, vector: { origin: 'user' } }),
+    });
+    const read = await ok('read_concept', { id });
+    expect(read['thoughtform']).toBe('a bare string');
+    expect(read['provenance']).toEqual({ vector: { origin: 'user' } });
+  });
 });
 
 describe('error codes', () => {
@@ -176,6 +190,10 @@ describe('error codes', () => {
     expect(errorCode(result)).toBe('VALIDATION_ERROR');
     expect(result.content[0]!.text).toContain('content');
     expect(errorCode(await call('search_concepts', { query: 'x', k: 0 }))).toBe('VALIDATION_ERROR');
+  });
+
+  it('carries NOT_FOUND for a tool the server does not have', async () => {
+    expect(errorCode(await call('agentvault_backup', {}))).toBe('NOT_FOUND');
   });
 
   it('refuses a namespace together with crossNamespace instead of ignoring one of them', async () => {

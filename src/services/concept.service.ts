@@ -5,6 +5,8 @@ import {
   AssertionStatusSchema,
   embeddingProblem,
   isMachineMade,
+  ProvenanceSchema,
+  RepresentationTypeSchema,
   SourceSchema,
   type AssertionStatus,
   type Concept,
@@ -140,16 +142,25 @@ interface PlannedWrite {
   embedding: number[] | null | undefined;
 }
 
-function parseProvenance(raw: string | undefined | null): ProvenanceMap {
+/** The stored provenance map; entries that do not parse are left out (none recorded). */
+export function parseProvenance(raw: string | undefined | null): ProvenanceMap {
   if (!raw) return {};
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as ProvenanceMap)
-      : {};
+    parsed = JSON.parse(raw);
   } catch {
     return {};
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const map: ProvenanceMap = {};
+  for (const [rep, entry] of Object.entries(parsed)) {
+    const representation = RepresentationTypeSchema.safeParse(rep);
+    const provenance = ProvenanceSchema.safeParse(entry);
+    if (representation.success && provenance.success) {
+      map[representation.data] = provenance.data;
+    }
+  }
+  return map;
 }
 
 /** A stored status, or null if the column holds none (or a value this version does not know). */

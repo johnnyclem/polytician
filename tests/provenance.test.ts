@@ -246,6 +246,19 @@ describe('backups carry provenance and assertion status', () => {
       provenance: saved.provenance,
     });
   });
+
+  it('leaves out provenance entries it cannot read instead of writing an unrestorable backup', async () => {
+    const saved = await conceptService.save({ markdown: 'odd provenance', autoEmbed: false });
+    await getAdapter().updateConcept(saved.id, {
+      provenance: JSON.stringify({ markdown: { from: 'thoughtform' }, thoughtform: 'x' }),
+    });
+    const backup = await exportBackup();
+    await conceptService.delete(saved.id);
+
+    const result = await importBackup(backup.file);
+    expect(result.inserted).toBe(1);
+    expect((await conceptService.read(saved.id)).provenance).toEqual({});
+  });
 });
 
 describe('MCP: provenance and assertion status', () => {

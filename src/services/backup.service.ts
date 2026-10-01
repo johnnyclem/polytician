@@ -8,7 +8,7 @@ import { getConfig } from '../config.js';
 import { conceptEventBus } from '../events/concept-events.js';
 import { logger } from '../logger.js';
 import { ConfigurationError, ValidationError } from '../errors/index.js';
-import { AssertionStatusSchema, VECTOR_DIMENSION, type ProvenanceMap } from '../types/concept.js';
+import { AssertionStatusSchema, VECTOR_DIMENSION } from '../types/concept.js';
 import { thoughtFormText, type StoredThoughtForm } from '../types/thoughtform.js';
 import { decodeBackup, encodeBackup, type BackupRecord } from '../backup/format.js';
 import { loadBackupKey, requireBackupKey, type BackupKey } from '../backup/key.js';
@@ -22,6 +22,7 @@ import {
 } from '../backup/files.js';
 import {
   conceptService,
+  parseProvenance,
   type RestoreConflictPolicy,
   type RestoreOutcome,
   type RestoreRecord,
@@ -80,7 +81,7 @@ function rowToRecord(row: ConceptRow): BackupRecord {
     markdown: row.markdown,
     thoughtform: row.thoughtform ? (JSON.parse(row.thoughtform) as StoredThoughtForm) : null,
     embedding: deserializeEmbedding(row.embedding),
-    provenance: parseJson<ProvenanceMap>(row.provenance, {}),
+    provenance: parseProvenance(row.provenance),
     assertionStatus: AssertionStatusSchema.safeParse(row.assertion_status).data ?? null,
     ledgerRef: row.ledger_ref ?? null,
   };
