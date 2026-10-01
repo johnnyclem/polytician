@@ -207,6 +207,54 @@ describe('Arweave archival (POLY-19)', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('uploads a version once when archives of it overlap (POLY3-R02)', async () => {
+    process.env['POLYTICIAN_BACKUP_KEY'] = keyBytes.toString('base64');
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return json({ txId: 'tx1', url: 'https://arweave.net/tx1', timestamp: 1, tags: [], size: 10 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const connector = new ArchivalConnector(archivalConfig());
+    const tagged = await conceptService.save({ markdown: 'v1', tags: ['publish'] });
+
+    // A tool call and the event bridge's debounced timer, for the same version.
+    const outcomes = await Promise.all([connector.archive(tagged.id), connector.archive(tagged.id)]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(outcomes.filter(o => o.archived)).toHaveLength(1);
+    expect(outcomes.filter(o => !o.archived)).toEqual([
+      { archived: false, reason: 'already-archived' },
+    ]);
+
+    // A new version is archived again.
+    await conceptService.save({ id: tagged.id, markdown: 'v2' });
+    expect((await connector.archive(tagged.id)).archived).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets an archive retry a version whose overlapping upload failed', async () => {
+    process.env['POLYTICIAN_BACKUP_KEY'] = keyBytes.toString('base64');
+    let fail = true;
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      if (fail) return json({ error: 'gateway down' }, 502);
+      return json({ txId: 'tx2', url: 'https://arweave.net/tx2', timestamp: 1, tags: [], size: 10 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const connector = new ArchivalConnector(archivalConfig());
+    const tagged = await conceptService.save({ markdown: 'v1', tags: ['publish'] });
+
+    const outcomes = await Promise.allSettled([
+      connector.archive(tagged.id),
+      connector.archive(tagged.id),
+    ]);
+    expect(outcomes.every(o => o.status === 'rejected')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fail = false;
+    expect((await connector.archive(tagged.id)).archived).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('vault_memory_pull (POLY-21)', () => {

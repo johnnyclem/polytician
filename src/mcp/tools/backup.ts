@@ -11,8 +11,13 @@ import { ExportBackupOut, ImportBackupOut, ListBackupsOut } from '../output-sche
 /**
  * Registers export_backup, import_backup and list_backups. Backups are files
  * in {dataDir}/backups in the versioned JSONL format of src/backup/format.ts.
+ * `writesLeaveBox` (AgentVault sync push or archival enabled) makes
+ * import_backup open-world: restored concepts are pushed like saved ones.
  */
-export function registerBackupTools(server: McpServer): void {
+export function registerBackupTools(
+  server: McpServer,
+  options: { writesLeaveBox: boolean } = { writesLeaveBox: false }
+): void {
   server.registerTool(
     'export_backup',
     {
@@ -56,7 +61,7 @@ export function registerBackupTools(server: McpServer): void {
     'import_backup',
     {
       description:
-        'Restore concepts from a backup file in the server\'s backups directory (name it as export_backup or list_backups report it). The file is verified (checksum, and the AES-GCM tag if encrypted) and every concept validated before anything is written; then all concepts are written in one transaction with their ids, namespaces, timestamps, tags, vectors and provenance. An existing concept is replaced only when the backup copy is newer (onConflict "newer", the default), always ("overwrite") or never ("skip"), and never across namespaces.',
+        'Restore concepts from a backup file in the server\'s backups directory (name it as export_backup or list_backups report it). The file is verified (checksum, and the AES-GCM tag if encrypted) and every concept validated before anything is written; then all concepts are written in one transaction with their ids, namespaces, timestamps, tags, vectors and provenance, as the store held them (content kept from 2.x that new writes refuse included). An existing concept is replaced only when the backup copy is newer (onConflict "newer", the default), always ("overwrite") or never ("skip"), and never across namespaces.',
       inputSchema: z
         .object({
           file: z
@@ -84,7 +89,7 @@ export function registerBackupTools(server: McpServer): void {
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
-        openWorldHint: false,
+        openWorldHint: options.writesLeaveBox,
       },
     },
     async ({ file, namespace, onConflict, reembed }) =>

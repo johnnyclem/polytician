@@ -6,6 +6,7 @@ import {
   type AgentVaultConfig,
 } from './integrations/agent-vault/config.js';
 import { ConfigurationError } from './errors/index.js';
+import { NAMESPACE_PATTERN } from './types/limits.js';
 
 /**
  * LLM used by conversions that generate content. 'agentvault' sends the text
@@ -258,11 +259,13 @@ export function getConfig(): PolyticianConfig {
           (fileConfig as Record<string, unknown>).backupThreshold,
         0
       ),
+      // At least 1: pruning to 0 would delete the auto-backup just written.
       retain: parseCount(
         'POLYTICIAN_BACKUP_RETAIN',
         process.env['POLYTICIAN_BACKUP_RETAIN'] ??
           (fileConfig as Record<string, unknown>).backupRetain,
-        10
+        10,
+        1
       ),
     },
   };
@@ -347,26 +350,46 @@ function parseHttpConfig(file: Record<string, unknown>, dataDir: string): HttpCo
   };
 }
 
-/** Accepts `'*'`, a comma-separated string, or a string array; anything else means unset. */
+/**
+ * `'*'`, a comma-separated string or a string array of namespace names; only
+ * an absent setting means "no allowlist". A value that is set but names no
+ * namespace, or names an invalid one, is an error: reading it as unset would
+ * silently lift the restriction the operator meant to set.
+ */
 function parseNamespaces(raw: unknown): NamespaceAllowlist {
   if (raw === undefined || raw === null) return null;
   if (raw === '*') return '*';
-  const items = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : null;
-  if (!items) return null;
-  const list = items
-    .filter((n): n is string => typeof n === 'string')
-    .map(n => n.trim())
-    .filter(n => n.length > 0);
+  const invalid = (problem: string): never => {
+    throw new ConfigurationError(
+      `POLYTICIAN_NAMESPACES (namespaces) ${problem}: set it to * or to namespace names separated by commas (each matching ${NAMESPACE_PATTERN.source}), or leave it unset for no allowlist`
+    );
+  };
+  let list: string[];
+  if (typeof raw === 'string') {
+    list = raw
+      .split(',')
+      .map(n => n.trim())
+      .filter(n => n.length > 0);
+  } else if (Array.isArray(raw)) {
+    list = raw.map(n => (typeof n === 'string' ? n.trim() : invalid('must list names as strings')));
+  } else {
+    return invalid('must be * or a list of namespace names');
+  }
+  if (list.length === 0) invalid('is set but names no namespace');
   if (list.includes('*')) return '*';
-  return list.length > 0 ? [...new Set(list)] : null;
+  const bad = list.find(n => !NAMESPACE_PATTERN.test(n));
+  if (bad !== undefined) invalid(`names an invalid namespace '${bad}'`);
+  return [...new Set(list)];
 }
 
-/** A non-negative integer setting; unset means `fallback`, anything else invalid is an error. */
-function parseCount(name: string, raw: unknown, fallback: number): number {
+/** An integer setting of at least `min`; unset means `fallback`, anything else invalid is an error. */
+function parseCount(name: string, raw: unknown, fallback: number, min = 0): number {
   if (raw === undefined || raw === null || raw === '') return fallback;
   const value = typeof raw === 'number' ? raw : Number(String(raw).trim());
-  if (!Number.isInteger(value) || value < 0) {
-    throw new ConfigurationError(`${name} must be a non-negative integer`);
+  if (!Number.isInteger(value) || value < min) {
+    throw new ConfigurationError(
+      `${name} must be a ${min > 0 ? 'positive' : 'non-negative'} integer`
+    );
   }
   return value;
 }

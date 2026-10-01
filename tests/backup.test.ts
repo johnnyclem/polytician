@@ -25,6 +25,7 @@ import {
 } from '../src/services/backup.service.js';
 import { getAdapter } from '../src/db/client.js';
 import { getConfig, resetConfig } from '../src/config.js';
+import { pruneBackups } from '../src/backup/files.js';
 
 let service: ConceptService;
 let backupSvc: BackupService;
@@ -179,6 +180,10 @@ describe('BackupService – auto-backup trigger with threshold', () => {
     const files = readdirSync(join(dataDir, 'backups')).sort();
     expect(files).toHaveLength(2);
     expect(files).toEqual(paths.slice(2).map(p => p.split('/').pop()).sort());
+
+    // Never prunes the newest one, whatever `keep` says (POLY3-R07).
+    expect(pruneBackups('auto', 0)).toEqual([files[0]]);
+    expect(readdirSync(join(dataDir, 'backups'))).toEqual([files[1]]);
   });
 
   it('writes owner-only files in an owner-only directory', async () => {

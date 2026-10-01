@@ -8,9 +8,10 @@ import { getConfig } from '../config.js';
 import { conceptEventBus } from '../events/concept-events.js';
 import { logger } from '../logger.js';
 import { ConfigurationError, ValidationError } from '../errors/index.js';
-import { AssertionStatusSchema, VECTOR_DIMENSION } from '../types/concept.js';
-import { thoughtFormText, type StoredThoughtForm } from '../types/thoughtform.js';
-import { decodeBackup, encodeBackup, type BackupRecord } from '../backup/format.js';
+import { AssertionStatusSchema, embeddingProblem, VECTOR_DIMENSION } from '../types/concept.js';
+import { StoredThoughtFormSchema, thoughtFormText } from '../types/thoughtform.js';
+import { parseTags } from '../db/tags.js';
+import { decodeBackup, encodeBackup, recordProblem, type BackupRecord } from '../backup/format.js';
 import { loadBackupKey, requireBackupKey, type BackupKey } from '../backup/key.js';
 import {
   backupsDir,
@@ -60,31 +61,41 @@ export interface ExportResult {
   keyId: string | null;
 }
 
-function parseJson<T>(raw: string | null | undefined, fallback: T): T {
-  if (!raw) return fallback;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
+/**
+ * A row as a backup record. Throws if the row cannot be one, so export never
+ * writes a file that import would refuse: both check records against the
+ * same schema (BackupRecordSchema) and the embedding rules.
+ */
 function rowToRecord(row: ConceptRow): BackupRecord {
-  return {
+  const unusable = (problem: string): Error =>
+    new Error(`Concept '${row.id}' cannot be written to a backup: ${problem}`);
+  let thoughtform: unknown = null;
+  if (row.thoughtform !== null) {
+    try {
+      thoughtform = JSON.parse(row.thoughtform);
+    } catch {
+      throw unusable('its stored thoughtform is not JSON');
+    }
+  }
+  const record: BackupRecord = {
     type: 'concept',
     id: row.id,
     namespace: row.namespace,
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    tags: parseJson<string[]>(row.tags, []),
+    tags: parseTags(row.tags),
     markdown: row.markdown,
-    thoughtform: row.thoughtform ? (JSON.parse(row.thoughtform) as StoredThoughtForm) : null,
+    thoughtform,
     embedding: deserializeEmbedding(row.embedding),
     provenance: parseProvenance(row.provenance),
     assertionStatus: AssertionStatusSchema.safeParse(row.assertion_status).data ?? null,
     ledgerRef: row.ledger_ref ?? null,
   };
+  const problem =
+    recordProblem(record) ?? (record.embedding ? embeddingProblem(record.embedding) : null);
+  if (problem) throw unusable(problem);
+  return record;
 }
 
 /**
@@ -222,7 +233,9 @@ async function reembedRecords(
     const hadVector = record.embedding !== null;
     record.embedding = null;
     delete record.provenance.vector;
-    const tfText = record.thoughtform ? thoughtFormText(record.thoughtform) : null;
+    // A free-form thoughtform stored by 2.x has no text to embed.
+    const tf = StoredThoughtFormSchema.safeParse(record.thoughtform);
+    const tfText = tf.success ? thoughtFormText(tf.data) : null;
     if (record.markdown?.trim()) pending.push({ record, text: record.markdown, from: 'markdown' });
     else if (tfText) pending.push({ record, text: tfText, from: 'thoughtform' });
     else if (hadVector) vectorsDropped++;

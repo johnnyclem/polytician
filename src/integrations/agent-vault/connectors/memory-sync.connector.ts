@@ -112,6 +112,13 @@ export async function applyPulledEntries(
 }
 
 /**
+ * What a push did: `pushed` (committed to memory_repo), `skipped` (nothing to
+ * push: no markdown or thoughtform, or a pull-only connector) or `failed`
+ * (logged; nothing was committed).
+ */
+export type PushOutcome = 'pushed' | 'skipped' | 'failed';
+
+/**
  * Bidirectional sync between Polytician concepts and AgentVault memory_repo.
  *
  * Push: Polytician -> memory_repo (on concept events)
@@ -144,8 +151,13 @@ export class MemorySyncConnector {
     }
   }
 
-  async pushConcept(conceptId: string): Promise<void> {
-    if (this.direction === 'pull') return;
+  /**
+   * Push a concept's markdown and thoughtform to memory_repo. Errors are
+   * logged and reported as 'failed', never thrown, so event handlers can fire
+   * and forget; a caller that reports results (the CLI) must check it.
+   */
+  async pushConcept(conceptId: string): Promise<PushOutcome> {
+    if (this.direction === 'pull') return 'skipped';
     try {
       const concept = await conceptService.read(conceptId);
       const entries: AVMemoryEntry[] = [];
@@ -180,12 +192,13 @@ export class MemorySyncConnector {
         });
       }
 
-      if (entries.length > 0) {
-        await this.client.commit(`polytician: upsert concept ${conceptId}`, entries);
-        logger.debug('av-sync pushed concept', { conceptId, entryCount: entries.length });
-      }
+      if (entries.length === 0) return 'skipped';
+      await this.client.commit(`polytician: upsert concept ${conceptId}`, entries);
+      logger.debug('av-sync pushed concept', { conceptId, entryCount: entries.length });
+      return 'pushed';
     } catch (err) {
       logger.error('av-sync push failed', err, { conceptId });
+      return 'failed';
     }
   }
 
@@ -200,6 +213,7 @@ export class MemorySyncConnector {
     }
   }
 
+  /** Pull every entry; null when this connector does not pull or the pull failed (logged). */
   async pullAll(): Promise<PullReport | null> {
     if (this.direction === 'push') return null;
     try {

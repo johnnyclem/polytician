@@ -301,7 +301,7 @@ export function registerVaultTools(server: McpServer, config: AgentVaultConfig):
     'vault_memory_repo_log',
     {
       description:
-        'Read the current state of the AgentVault memory_repo branch for this Polytician namespace.',
+        'Read the current state of the AgentVault memory_repo branch Polytician syncs with (agentVault.memoryRepoBranch): its head and the keys of the concept entries on it, from every namespace. Takes no namespace.',
       inputSchema: z.object({}).strict(),
       outputSchema: VaultMemoryRepoLogOut,
       annotations: {

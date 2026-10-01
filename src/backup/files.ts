@@ -135,7 +135,10 @@ export function listBackupFiles(): BackupFileInfo[] {
   );
 }
 
-/** Delete all but the `keep` newest files named polytician-<prefix>-*.jsonl. */
+/**
+ * Delete all but the `keep` newest files named polytician-<prefix>-*.jsonl.
+ * At least one is always kept, so pruning never removes the backup just written.
+ */
 export function pruneBackups(prefix: 'backup' | 'auto', keep: number): string[] {
   const dir = backupsDir();
   if (!existsSync(dir)) return [];
@@ -144,7 +147,7 @@ export function pruneBackups(prefix: 'backup' | 'auto', keep: number): string[] 
     .filter(f => f.startsWith(pattern) && f.endsWith(BACKUP_EXTENSION))
     .sort()
     .reverse();
-  const removed = files.slice(Math.max(keep, 0));
+  const removed = files.slice(Math.max(keep, 1));
   for (const file of removed) rmSync(join(dir, file), { force: true });
   return removed;
 }

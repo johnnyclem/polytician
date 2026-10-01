@@ -26,6 +26,7 @@ export function initializeDatabase(overrideDbPath?: string): DatabaseAdapter {
   const sqliteAdapter = new SqliteAdapter(dbPath);
   sqliteAdapter.initialize();
   logLegacyLabels(sqliteAdapter.labelLegacyVectors(config.embeddingModel), config.embeddingModel);
+  logLegacyTags(sqliteAdapter.normalizeLegacyTags());
   adapter = sqliteAdapter;
   return adapter;
 }
@@ -37,6 +38,11 @@ export function initializeDatabase(overrideDbPath?: string): DatabaseAdapter {
  */
 function logLegacyLabels(count: number, model: string): void {
   if (count > 0) logger.info('labelled vectors stored before 3.0', { count, model });
+}
+
+/** 2.x could store `tags` JSON-encoded twice or NULL; the first 3.0 start rewrites them once. */
+function logLegacyTags(count: number): void {
+  if (count > 0) logger.info('rewrote tags stored before 3.0 as JSON arrays', { count });
 }
 
 /**
@@ -55,6 +61,7 @@ export async function initializeDatabaseAsync(overrideDbPath?: string): Promise<
       await pgAdapter.labelLegacyVectors(config.embeddingModel),
       config.embeddingModel
     );
+    logLegacyTags(await pgAdapter.normalizeLegacyTags());
     adapter = pgAdapter;
     return adapter;
   }

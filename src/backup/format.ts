@@ -1,16 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import {
-  AssertionStatusSchema,
-  LedgerRefSchema,
-  MarkdownSchema,
-  NamespaceSchema,
-  ProvenanceMapSchema,
-  TagsSchema,
-  type AssertionStatus,
-  type ProvenanceMap,
-} from '../types/concept.js';
-import { StoredThoughtFormSchema, type StoredThoughtForm } from '../types/thoughtform.js';
+import { StoredConceptSchema, type AssertionStatus, type ProvenanceMap } from '../types/concept.js';
 import { ConfigurationError, ValidationError } from '../errors/index.js';
 import type { BackupKey } from './key.js';
 import { CIPHER_NAME, newNonce, openBytes, sealBytes } from './seal.js';
@@ -62,26 +52,15 @@ export const BackupHeaderSchema = z
 
 export type BackupHeader = z.infer<typeof BackupHeaderSchema>;
 
-const epochMs = z.number().int().nonnegative();
-
-/** One concept, with every representation as a JSON value (never a JSON-encoded string). */
-export const BackupRecordSchema = z
-  .object({
-    type: z.literal('concept'),
-    id: z.string().uuid(),
-    namespace: NamespaceSchema,
-    version: z.number().int().positive(),
-    createdAt: epochMs,
-    updatedAt: epochMs,
-    tags: TagsSchema,
-    markdown: MarkdownSchema.nullable(),
-    thoughtform: StoredThoughtFormSchema.nullable(),
-    embedding: z.array(z.number()).nullable(),
-    provenance: ProvenanceMapSchema,
-    assertionStatus: AssertionStatusSchema.nullable(),
-    ledgerRef: LedgerRefSchema.nullable(),
-  })
-  .strict();
+/**
+ * One concept as the store held it, with every representation as a JSON value
+ * (never a JSON-encoded string). Export and import apply the same rules
+ * (StoredConceptSchema): types are checked, the caps and schemas for new
+ * writes are not, so concepts a store kept from 2.x round-trip unchanged.
+ */
+export const BackupRecordSchema = StoredConceptSchema.extend({
+  type: z.literal('concept'),
+}).strict();
 
 export interface BackupRecord {
   type: 'concept';
@@ -92,7 +71,8 @@ export interface BackupRecord {
   updatedAt: number;
   tags: string[];
   markdown: string | null;
-  thoughtform: StoredThoughtForm | null;
+  /** A ThoughtForm, or any JSON value 2.x stored as one; null for none. */
+  thoughtform: unknown;
   embedding: number[] | null;
   provenance: ProvenanceMap;
   assertionStatus: AssertionStatus | null;
@@ -208,6 +188,12 @@ function invalidField(error: z.ZodError): string {
   return typeof field === 'string' ? `field '${field}' is invalid` : 'unexpected structure';
 }
 
+/** Why `record` is not a backup record (a field name, never its content), or null if it is one. */
+export function recordProblem(record: unknown): string | null {
+  const parsed = BackupRecordSchema.safeParse(record);
+  return parsed.success ? null : invalidField(parsed.error);
+}
+
 /** Read just the header (line 1) of a backup file, e.g. to list backups. Null if it is not one. */
 export function readBackupHeader(firstLine: string): BackupHeader | null {
   try {
@@ -300,10 +286,8 @@ export function decodeBackup(bytes: Buffer, getKey: () => BackupKey | null): Dec
       return;
     }
     hash.update(line + '\n', 'utf-8');
-    const parsed = BackupRecordSchema.safeParse(raw);
-    if (!parsed.success) {
-      throw new BackupFormatError(`Backup line ${lineNo}: ${invalidField(parsed.error)}`);
-    }
+    const problem = recordProblem(raw);
+    if (problem) throw new BackupFormatError(`Backup line ${lineNo}: ${problem}`);
     // Keep the value as written: schema defaults and key stripping must not
     // change what is restored (a thoughtform is stored exactly as saved).
     records.push(raw as BackupRecord);

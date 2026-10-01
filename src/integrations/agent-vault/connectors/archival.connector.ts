@@ -90,6 +90,13 @@ export class ArchivalConnector {
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
   /** Last version archived per concept by this process, so a version is uploaded once. */
   private readonly archivedVersion = new Map<string, number>();
+  /**
+   * Uploads in progress, by `<conceptId>@<version>`. Reserved before the
+   * first await of an upload, so an overlapping archive of the same version
+   * (a tool call and the event bridge's timer) waits for it instead of
+   * uploading the version a second time.
+   */
+  private readonly uploading = new Map<string, Promise<AVArweaveReceipt>>();
   private readonly jwkReady: Promise<boolean>;
 
   constructor(config: AgentVaultConfig) {
@@ -183,6 +190,13 @@ export class ArchivalConnector {
     if (this.archivedVersion.get(conceptId) === version) {
       return { archived: false, reason: 'already-archived' };
     }
+    const slot = `${conceptId}@${version}`;
+    const inFlight = this.uploading.get(slot);
+    if (inFlight) {
+      // Rejects if that upload failed, so the caller does not report it archived.
+      await inFlight;
+      return { archived: false, reason: 'already-archived' };
+    }
 
     const envelope = sealArchive(
       {
@@ -196,12 +210,19 @@ export class ArchivalConnector {
       },
       this.key
     );
-    const receipt = await this.client.upload({
+    const upload = this.client.upload({
       content: JSON.stringify(envelope),
       contentType: 'json',
       tags: [],
       metadata: { conceptId, version, encrypted: true, archivedAt: Date.now() },
     });
+    this.uploading.set(slot, upload);
+    let receipt: AVArweaveReceipt;
+    try {
+      receipt = await upload;
+    } finally {
+      this.uploading.delete(slot);
+    }
     this.archivedVersion.set(conceptId, version);
 
     logger.info('av-archive concept archived', {

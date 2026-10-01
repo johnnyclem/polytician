@@ -161,6 +161,33 @@ export const ConceptSchema = z.object({
 
 export type Concept = z.infer<typeof ConceptSchema>;
 
+/**
+ * A concept as a store holds it: what a backup record carries and a restore
+ * writes back. Fields are checked for type, not against the caps and schemas
+ * a new write must meet: a store migrated from 2.x holds content 2.x accepted
+ * and 3.0 refuses on a new write (a thoughtform of any JSON shape, more or
+ * longer tags, larger markdown, other ids and namespace names, a concept with
+ * no representation), and a backup of it must restore it as it was.
+ */
+export const StoredConceptSchema = z.object({
+  id: z.string(),
+  namespace: z.string(),
+  version: z.number().int().positive(),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+  tags: z.array(z.string()),
+  markdown: z.string().nullable(),
+  /** A ThoughtForm, or any JSON value 2.x stored as one; null for none. */
+  thoughtform: z
+    .unknown()
+    .refine(v => v !== undefined, 'thoughtform must be present (null for none)'),
+  /** Checked against the embedding rules when it is restored (a re-embedding import drops it). */
+  embedding: z.array(z.number()).nullable(),
+  provenance: ProvenanceMapSchema,
+  assertionStatus: AssertionStatusSchema.nullable(),
+  ledgerRef: LedgerRefSchema.nullable(),
+});
+
 export interface ConceptRepresentations {
   vector: boolean;
   markdown: boolean;

@@ -201,10 +201,35 @@ export async function runRestore(
     }
     totalChunks += chunkRecords.length;
 
-    // Step 4: Decrypt if needed
+    // Step 4: Decrypt if needed. Every chunk of a commit carries the same
+    // flags; a mix means the chunk records were altered. A restore that
+    // expects encryption authenticates every commit with AES-GCM: a commit
+    // stored as plaintext is refused, since its manifestHash comes from the
+    // same canister and so proves nothing about who wrote it.
+    const { encrypted, compressed } = chunkRecords[0]!;
+    if (chunkRecords.some(c => c.encrypted !== encrypted || c.compressed !== compressed)) {
+      return failRestore(
+        `Integrity error for commit ${commit.commitId}: its chunks disagree on encryption or compression`,
+        EXIT_INTEGRITY,
+        startMs
+      );
+    }
+    if (!encrypted && options.encryption !== 'none') {
+      return failRestore(
+        `Integrity error for commit ${commit.commitId}: it is not encrypted, but this restore requires ${options.encryption}`,
+        EXIT_INTEGRITY,
+        startMs
+      );
+    }
+    if (encrypted && options.encryption === 'none') {
+      return failRestore(
+        `Commit ${commit.commitId} is encrypted: restore with the encryption mode and key it was written with`,
+        EXIT_VALIDATION,
+        startMs
+      );
+    }
     let decrypted: Uint8Array;
-    const encrypted = chunkRecords[0]!.encrypted;
-    if (encrypted && options.encryption !== 'none') {
+    if (encrypted) {
       if (!options.decryptionKey) {
         return failRestore('Decryption key required for encrypted data', EXIT_VALIDATION, startMs);
       }
@@ -229,7 +254,6 @@ export async function runRestore(
     }
 
     // Step 5: Decompress if needed
-    const compressed = chunkRecords[0]!.compressed;
     const compressionMode: CompressionMode = compressed ? options.compression : 'none';
     let decompressed: Uint8Array;
     try {

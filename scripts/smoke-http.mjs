@@ -3,6 +3,10 @@
 //   POLYTICIAN_HTTP_TOKEN=... node scripts/smoke-http.mjs [baseUrl] [--embed]
 // Saves a concept with an explicit vector and finds it again. --embed also
 // saves markdown and searches by text, which loads the embedding model.
+// Every concept it saves carries a tag unique to the run, which the searches
+// filter on (so concepts already on the server, earlier smoke runs included,
+// cannot change the result), and is deleted again before the script exits.
+import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
@@ -12,9 +16,10 @@ const base = (args.find(a => !a.startsWith('--')) ?? 'http://127.0.0.1:8788').re
 const token = process.env.POLYTICIAN_HTTP_TOKEN;
 if (!token) throw new Error('set POLYTICIAN_HTTP_TOKEN');
 
+class SmokeFailure extends Error {}
+
 function fail(message) {
-  console.error(`smoke: ${message}`);
-  process.exit(1);
+  throw new SmokeFailure(message);
 }
 
 async function waitForHealth() {
@@ -31,41 +36,67 @@ function payload(result) {
   return JSON.parse(result.content[0].text);
 }
 
-await waitForHealth();
-const client = new Client({ name: 'polytician-smoke', version: '1.0.0' });
-await client.connect(
-  new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
-    requestInit: { headers: { Authorization: `Bearer ${token}` } },
-  })
-);
+/** Save → search with a vector (and with text for --embed), filtered on this run's tag. */
+async function smoke(client, save) {
+  const { tools } = await client.listTools();
+  if (!tools.some(t => t.name === 'save_concept')) fail('save_concept is not listed');
 
-const { tools } = await client.listTools();
-if (!tools.some(t => t.name === 'save_concept')) fail('save_concept is not listed');
-
-const vector = Array.from({ length: 384 }, (_, i) => (i === 7 ? 1 : 0));
-const saved = payload(
-  await client.callTool({ name: 'save_concept', arguments: { embedding: vector, tags: ['smoke'] } })
-);
-const { results: found } = payload(
-  await client.callTool({ name: 'search_concepts', arguments: { vector, k: 1 } })
-);
-if (found[0]?.id !== saved.id) fail(`vector search returned ${JSON.stringify(found)}`);
-
-if (embed) {
-  const text = payload(
-    await client.callTool({
-      name: 'save_concept',
-      arguments: { markdown: 'Polytician smoke test: shared semantic memory over HTTP' },
-    })
+  const runTag = `smoke-${randomUUID()}`;
+  // A random unit vector, so two runs never save the same one.
+  const raw = Array.from({ length: 384 }, () => Math.random() - 0.5);
+  const norm = Math.hypot(...raw);
+  const vector = raw.map(x => x / norm);
+  const concept = await save({ embedding: vector, tags: [runTag] });
+  const { results: found } = payload(
+    await client.callTool({ name: 'search_concepts', arguments: { vector, k: 1, tags: [runTag] } })
   );
-  const { results: hits } = payload(
-    await client.callTool({
-      name: 'search_concepts',
-      arguments: { query: 'shared semantic memory', k: 1 },
-    })
-  );
-  if (hits[0]?.id !== text.id) fail(`text search returned ${JSON.stringify(hits)}`);
+  if (found[0]?.id !== concept.id) fail(`vector search returned ${JSON.stringify(found)}`);
+
+  if (embed) {
+    const text = await save({
+      markdown: `Polytician smoke test ${runTag}: shared semantic memory over HTTP`,
+      tags: [runTag],
+    });
+    const { results: hits } = payload(
+      await client.callTool({
+        name: 'search_concepts',
+        arguments: { query: 'shared semantic memory', k: 1, tags: [runTag] },
+      })
+    );
+    if (hits[0]?.id !== text.id) fail(`text search returned ${JSON.stringify(hits)}`);
+  }
 }
 
-await client.close();
-console.log(`smoke: ok (${base}${embed ? ', with embedding model' : ''})`);
+async function main() {
+  await waitForHealth();
+  const client = new Client({ name: 'polytician-smoke', version: '1.0.0' });
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    })
+  );
+
+  const saved = [];
+  const save = async args => {
+    const concept = payload(await client.callTool({ name: 'save_concept', arguments: args }));
+    saved.push(concept.id);
+    return concept;
+  };
+  try {
+    await smoke(client, save);
+  } finally {
+    for (const id of saved) {
+      const result = await client.callTool({ name: 'delete_concept', arguments: { id } });
+      if (result.isError) console.error(`smoke: could not delete ${id}: ${result.content?.[0]?.text}`);
+    }
+    await client.close();
+  }
+}
+
+try {
+  await main();
+  console.log(`smoke: ok (${base}${embed ? ', with embedding model' : ''})`);
+} catch (err) {
+  console.error(`smoke: ${err instanceof SmokeFailure ? err.message : err}`);
+  process.exit(1);
+}

@@ -93,6 +93,9 @@ function hostAllowed(header: string | undefined, allowed: readonly string[]): bo
   });
 }
 
+/** Request headers a browser client of /mcp sends; a CORS preflight asks for these. */
+const CORS_ALLOW_HEADERS = 'Authorization, Content-Type, Accept, Mcp-Protocol-Version';
+
 function reject(res: ServerResponse, status: number, message: string, headers = {}): void {
   res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
   res.end(JSON.stringify({ error: message }));
@@ -105,7 +108,10 @@ function reject(res: ServerResponse, status: number, message: string, headers = 
  *
  * /mcp requires, in order: a Host header naming an allowed host (DNS
  * rebinding), no Origin or an allowed one (browsers), and
- * `Authorization: Bearer <token>`. The health endpoints need none of these
+ * `Authorization: Bearer <token>`. For an allowed Origin the server answers
+ * CORS: a preflight (OPTIONS, which browsers send without the token) gets 204
+ * with the allowed method and headers, and every response names the origin
+ * in Access-Control-Allow-Origin. The health endpoints need none of these
  * and reveal only ok/error.
  */
 export async function startHttpServer(options: HttpServerOptions): Promise<RunningHttpServer> {
@@ -126,6 +132,19 @@ export async function startHttpServer(options: HttpServerOptions): Promise<Runni
     if (origin !== undefined && !options.allowedOrigins.includes(origin)) {
       reject(res, 403, 'Origin not allowed');
       return;
+    }
+    if (origin !== undefined) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Methods': 'POST',
+          'Access-Control-Allow-Headers': CORS_ALLOW_HEADERS,
+          'Access-Control-Max-Age': '600',
+        });
+        res.end();
+        return;
+      }
     }
     if (!authorized(req)) {
       reject(res, 401, 'Missing or invalid bearer token', {

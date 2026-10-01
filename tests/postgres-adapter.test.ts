@@ -12,7 +12,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
-import { initializeDatabaseAsync, closeDatabase, resetAdapter } from '../src/db/client.js';
+import {
+  initializeDatabaseAsync,
+  closeDatabase,
+  getAdapter,
+  resetAdapter,
+} from '../src/db/client.js';
 import { getConfig, resetConfig } from '../src/config.js';
 import { ConceptService } from '../src/services/concept.service.js';
 import { VersionConflictError } from '../src/errors/index.js';
@@ -97,8 +102,23 @@ describe.skipIf(!PG_URL)('PostgresAdapter (pgvector)', () => {
       id,
       `[${e.join(',')}]`,
     ]);
+    // Tags as a 2.x `agentvault-sync restore` stored them (POLY-R2), and NULL.
+    const stringTags = '0d000000-0000-4000-a000-000000000011';
+    const nullTags = '0d000000-0000-4000-a000-000000000012';
+    await admin.query(
+      `INSERT INTO concepts (id, created_at, updated_at, tags, markdown) VALUES ($1, 1, 1, $2, 's'), ($3, 1, 1, NULL, 'n')`,
+      [stringTags, JSON.stringify('["b","c"]'), nullTags]
+    );
 
     await open();
+    expect((await service.read(stringTags)).tags).toEqual(['b', 'c']);
+    expect((await service.read(nullTags)).tags).toEqual([]);
+    expect((await service.list({ tags: ['b'] })).concepts.map(c => c.id)).toEqual([stringTags]);
+    const stored = await admin.query<{ tags: string }>(
+      'SELECT tags FROM concepts WHERE id = ANY($1) ORDER BY id',
+      [[stringTags, nullTags]]
+    );
+    expect(stored.rows.map(r => r.tags)).toEqual(['["b","c"]', '[]']);
 
     const { rows } = await admin.query<{ indexdef: string }>(
       "SELECT indexdef FROM pg_indexes WHERE tablename = 'concept_vectors'"
@@ -213,6 +233,68 @@ describe.skipIf(!PG_URL)('PostgresAdapter (pgvector)', () => {
 
     await service.save({ id: verified.id, namespace: 'default', assertionStatus: null });
     expect((await service.read(verified.id)).assertionStatus).toBeNull();
+  });
+
+  it('finds a small filtered namespace behind a crowd when the iterative scan gives up (POLY3-R05)', async () => {
+    // pgvector ends an iterative HNSW scan after hnsw.max_scan_tuples
+    // (20,000 by default); a low limit and no explicit sorts reproduce, on a
+    // small table, a large table whose crowd of near vectors hides the matches.
+    const { rows: db } = await admin.query<{ db: string }>('SELECT current_database() AS db');
+    const database = `"${db[0]!.db}"`;
+    await admin.query(`ALTER DATABASE ${database} SET hnsw.max_scan_tuples = 100`);
+    await admin.query(`ALTER DATABASE ${database} SET enable_sort = off`);
+    try {
+      await searchBehindCrowd();
+    } finally {
+      await admin.query(`ALTER DATABASE ${database} RESET hnsw.max_scan_tuples`);
+      await admin.query(`ALTER DATABASE ${database} RESET enable_sort`);
+    }
+  });
+
+  async function searchBehindCrowd(): Promise<void> {
+    await open();
+    const model = getConfig().embeddingModel;
+    await admin.query(
+      `INSERT INTO concepts (id, namespace, created_at, updated_at, tags, markdown, embedding, embedding_model)
+       SELECT 'big-' || i, 'big', 1, 1, '[]', 'near', '\\x00'::bytea, $1 FROM generate_series(1, 2000) i`,
+      [model]
+    );
+    await admin.query(
+      `INSERT INTO concept_vectors (concept_id, embedding)
+       SELECT 'big-' || i, ('[1,' || (i / 100000.0)::text || repeat(',0', ${VECTOR_DIMENSION - 2}) || ']')::vector
+       FROM generate_series(1, 2000) i`
+    );
+    await admin.query('ANALYZE concepts');
+    await admin.query('ANALYZE concept_vectors');
+    const far = [];
+    for (let i = 0; i < 3; i++) far.push((await service.save({ namespace: 'small', embedding: vec(10 + i) })).id);
+
+    const hits = await service.search(vec(0), 3, undefined, { namespace: 'small' });
+    expect(hits.map(h => h.id).sort()).toEqual([...far].sort());
+  }
+
+  it('refuses a stale update once its id was re-created in another namespace (POLY3-R03)', async () => {
+    await open();
+    const id = '0d000000-0000-4000-a000-000000000005';
+    await service.save({ id, namespace: 'a', markdown: 'from a', embedding: vec(1) });
+    const stale = {
+      kind: 'update' as const,
+      id,
+      namespace: 'a',
+      expectedVersion: 1,
+      fields: {
+        version: 2,
+        updated_at: Date.now(),
+        markdown: 'written from a',
+        embedding: Buffer.from(new Float32Array(vec(2)).buffer),
+      },
+    };
+    await service.delete(id, { namespace: 'a' });
+    await service.save({ id, namespace: 'b', markdown: 'from b', embedding: vec(3) });
+
+    expect(await getAdapter().applyWrites([stale])).toEqual({ ok: false, index: 0 });
+    expect(await service.read(id)).toMatchObject({ namespace: 'b', markdown: 'from b' });
+    expect(await service.search(vec(2), 5, undefined, { namespace: 'a' })).toEqual([]);
   });
 
   it('returns up to k results beyond the default ef_search', async () => {

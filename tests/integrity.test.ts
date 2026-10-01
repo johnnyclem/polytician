@@ -212,6 +212,51 @@ describe('Data integrity (SQLite)', () => {
       const top3 = await service.search(vec(9), 3);
       expect(top3.map(r => r.id)).toEqual([...ids].sort().slice(0, 3));
     });
+
+    it('breaks ties by id in a multi-namespace search as in a single one (POLY3-R04)', async () => {
+      // Inserted in descending id order, so vec0's own order is not the id order.
+      const ids = Array.from(
+        { length: 300 },
+        (_, i) => `0c100000-0000-4000-a000-${String(999_999 - i).padStart(12, '0')}`
+      );
+      await service.saveBatch(ids.map(id => ({ id, namespace: 'a', embedding: vec(9) })));
+      await service.save({ namespace: 'b', embedding: vec(9, 0.5) });
+
+      const expected = [...ids].sort().slice(0, 2);
+      const single = await service.search(vec(9), 2, undefined, { namespace: 'a' });
+      expect(single.map(r => r.id)).toEqual(expected);
+      const multi = await service.search(vec(9), 2, undefined, { namespaces: ['a', 'b'] });
+      expect(multi.map(r => r.id)).toEqual(expected);
+    });
+  });
+
+  // --- POLY3-R03: the namespace precondition is checked in the same UPDATE ---
+
+  describe('versioned updates and re-created ids', () => {
+    it('refuses a stale update once its id was re-created in another namespace', async () => {
+      const id = '0c200000-0000-4000-a000-000000000001';
+      await service.save({ id, namespace: 'a', markdown: 'from a', embedding: vec(1) });
+      // The update a writer in 'a' planned from the row it read at version 1.
+      const stale = {
+        kind: 'update' as const,
+        id,
+        namespace: 'a',
+        expectedVersion: 1,
+        fields: {
+          version: 2,
+          updated_at: Date.now(),
+          markdown: 'written from a',
+          embedding: Buffer.from(new Float32Array(vec(2)).buffer),
+        },
+      };
+      await service.delete(id, { namespace: 'a' });
+      await service.save({ id, namespace: 'b', markdown: 'from b', embedding: vec(3) });
+
+      expect(await getAdapter().applyWrites([stale])).toEqual({ ok: false, index: 0 });
+      expect(await service.read(id)).toMatchObject({ namespace: 'b', markdown: 'from b' });
+      expect(await service.search(vec(2), 5, undefined, { namespace: 'a' })).toEqual([]);
+      expect((await service.search(vec(3), 5, undefined, { namespace: 'b' }))[0]?.id).toBe(id);
+    });
   });
 
   // --- POLY-34: list tag filter matches tags exactly ---

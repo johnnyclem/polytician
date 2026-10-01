@@ -45,15 +45,11 @@ async function ok<T = Record<string, unknown>>(name: string, args: Record<string
   return JSON.parse(result.content[0]!.text) as T;
 }
 
-/** Tool error body; SDK-level input validation errors are plain text, so fall back to it. */
+/** Tool error body: every error, input validation included, is `{ error, code }` JSON. */
 function errorBody(result: RawResult): { code?: string; error?: string; text: string } {
   expect(result.isError).toBe(true);
   const text = result.content[0]!.text;
-  try {
-    return { ...(JSON.parse(text) as { code?: string; error?: string }), text };
-  } catch {
-    return { text };
-  }
+  return { ...(JSON.parse(text) as { code?: string; error?: string }), text };
 }
 
 async function connect(): Promise<void> {

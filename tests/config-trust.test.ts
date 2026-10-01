@@ -13,6 +13,9 @@ const ENV = [
   'POLYTICIAN_LLM_PROVIDER',
   'POLYTICIAN_TEST_TOKEN',
   'AWS_SECRET_ACCESS_KEY',
+  'POLYTICIAN_NAMESPACES',
+  'POLYTICIAN_BACKUP_THRESHOLD',
+  'POLYTICIAN_BACKUP_RETAIN',
 ];
 
 function writeConfig(name: string, value: unknown): string {
@@ -146,5 +149,44 @@ describe('archival configuration (POLY-19)', () => {
       })
     );
     expect(getConfig().agentVault?.archival.tagFilter).toEqual(['publish']);
+  });
+});
+
+describe('namespace allowlist (POLY3-R06)', () => {
+  it('reads *, a comma-separated list or an array', () => {
+    process.env['POLYTICIAN_NAMESPACES'] = ' work , personal,,work, ';
+    resetConfig();
+    expect(getConfig().namespaces).toEqual(['work', 'personal']);
+    process.env['POLYTICIAN_NAMESPACES'] = '*';
+    resetConfig();
+    expect(getConfig().namespaces).toBe('*');
+    delete process.env['POLYTICIAN_NAMESPACES'];
+    withConfigFlag(writeConfig('ns.json', { namespaces: ['a', 'b'] }));
+    expect(getConfig().namespaces).toEqual(['a', 'b']);
+  });
+
+  it('leaves the allowlist unset only when the setting is absent', () => {
+    expect(getConfig().namespaces).toBeNull();
+  });
+
+  it('refuses a set but empty or malformed allowlist instead of allowing every namespace', () => {
+    for (const value of ['', ' , ', 'work,has space', 'a,b/c']) {
+      process.env['POLYTICIAN_NAMESPACES'] = value;
+      resetConfig();
+      expect(() => getConfig(), JSON.stringify(value)).toThrow(/POLYTICIAN_NAMESPACES/);
+    }
+    delete process.env['POLYTICIAN_NAMESPACES'];
+    for (const [i, value] of [[], {}, 7, ['ok', 3], ['bad name']].entries()) {
+      withConfigFlag(writeConfig(`ns${i}.json`, { namespaces: value }));
+      expect(() => getConfig(), JSON.stringify(value)).toThrow(/POLYTICIAN_NAMESPACES/);
+    }
+  });
+});
+
+describe('auto-backup retention (POLY3-R07)', () => {
+  it('refuses POLYTICIAN_BACKUP_RETAIN=0, which would delete every auto-backup', () => {
+    process.env['POLYTICIAN_BACKUP_RETAIN'] = '0';
+    resetConfig();
+    expect(() => getConfig()).toThrow(/POLYTICIAN_BACKUP_RETAIN must be a positive integer/);
   });
 });

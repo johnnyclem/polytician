@@ -814,6 +814,62 @@ describe('runRestore', () => {
     expect(exitCode).toBe(EXIT_INTEGRITY);
   });
 
+  it('refuses a plaintext commit when the restore requires encryption (POLY3-R08)', async () => {
+    const key = new Uint8Array(randomBytes(32));
+    // Whoever can write commits stores a plaintext one with a matching manifestHash.
+    const injected = makeThoughtForm({ id: 'tf_injected', rawText: 'injected' });
+    await runBackup(canister, defaultBackupOptions({ from: writeInput([injected]) }));
+    for (const chunk of canister.chunks.values()) expect(chunk.encrypted).toBe(false);
+
+    const { result, exitCode } = await runRestore(
+      canister,
+      defaultRestoreOptions({ encryption: 'vetkeys-aes-gcm-v1', decryptionKey: key })
+    );
+    expect(exitCode).toBe(EXIT_INTEGRITY);
+    expect((result as unknown as { error: string }).error).toMatch(/not encrypted/);
+    expect(existsSync(defaultRestoreOptions().to)).toBe(false);
+  });
+
+  it('refuses a commit whose chunks disagree on their flags (POLY3-R08)', async () => {
+    const key = new Uint8Array(randomBytes(32));
+    const tf = makeThoughtForm({ rawText: 'x'.repeat(4000) });
+    await runBackup(
+      canister,
+      defaultBackupOptions({
+        from: writeInput([tf]),
+        chunkSize: 1024,
+        encrypt: 'vetkeys-aes-gcm-v1',
+        encryptionRequired: true,
+        encryptionKey: key,
+      })
+    );
+    const chunks = Array.from(canister.chunks.values());
+    expect(chunks.length).toBeGreaterThan(1);
+    chunks[1]!.encrypted = false;
+
+    const { result, exitCode } = await runRestore(
+      canister,
+      defaultRestoreOptions({ encryption: 'vetkeys-aes-gcm-v1', decryptionKey: key })
+    );
+    expect(exitCode).toBe(EXIT_INTEGRITY);
+    expect((result as unknown as { error: string }).error).toMatch(/disagree/);
+  });
+
+  it('names the problem when an encrypted commit is restored without encryption', async () => {
+    await runBackup(
+      canister,
+      defaultBackupOptions({
+        from: writeInput([makeThoughtForm()]),
+        encrypt: 'vetkeys-aes-gcm-v1',
+        encryptionRequired: true,
+        encryptionKey: new Uint8Array(randomBytes(32)),
+      })
+    );
+    const { result, exitCode } = await runRestore(canister, defaultRestoreOptions());
+    expect(exitCode).toBe(EXIT_VALIDATION);
+    expect((result as unknown as { error: string }).error).toMatch(/is encrypted/);
+  });
+
   it('returns EXIT_VALIDATION when decryption key missing for encrypted data', async () => {
     const key = randomBytes(32);
     const tf = makeThoughtForm();

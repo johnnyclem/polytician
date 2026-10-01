@@ -23,7 +23,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createServer } from '../src/server.js';
 import { setupTestDb, teardownTestDb } from './helpers/test-db.js';
-import { resetConfig } from '../src/config.js';
+import { getConfig, resetConfig } from '../src/config.js';
 import { getAdapter } from '../src/db/client.js';
 import { registerVaultTools } from '../src/integrations/agent-vault/tools/vault-tools.js';
 import { AgentVaultConfigSchema } from '../src/integrations/agent-vault/config.js';
@@ -121,6 +121,30 @@ describe('tool listing', () => {
     expect(hints['save_concept']?.idempotentHint).toBe(false);
     expect(hints['export_backup']).toMatchObject({ readOnlyHint: false, destructiveHint: false });
   });
+
+  it('marks every writing tool open-world when sync push is enabled, import_backup included (POLY-R4)', async () => {
+    const writers = [
+      'save_concept',
+      'batch_save_concepts',
+      'delete_concept',
+      'convert_concept',
+      'reembed_concepts',
+      'import_backup',
+    ];
+    const local = Object.fromEntries(tools.map(t => [t.name, t.annotations?.openWorldHint]));
+    for (const name of writers) expect(local[name], name).toBe(false);
+
+    getConfig().agentVault = AgentVaultConfigSchema.parse({
+      apiBaseUrl: 'https://av.example',
+      apiToken: 'token',
+      sync: { enabled: true, direction: 'push' },
+    });
+    await connect(await createServer());
+    const synced = Object.fromEntries(tools.map(t => [t.name, t.annotations?.openWorldHint]));
+    for (const name of writers) expect(synced[name], name).toBe(true);
+    // Restored concepts are pushed like saved ones; exporting writes a local file only.
+    expect(synced['export_backup']).toBe(false);
+  });
 });
 
 describe('structured results', () => {
@@ -161,6 +185,23 @@ describe('structured results', () => {
     const read = await ok('read_concept', { id });
     expect(read['thoughtform']).toBe('a bare string');
     expect(read['provenance']).toEqual({ vector: { origin: 'user' } });
+  });
+
+  it('reads 2.x tags stored as a JSON string as an array in read, list and search (POLY-R2)', async () => {
+    const saved = await ok('save_concept', { markdown: 'legacy tags', tags: ['a'] });
+    const id = saved['id'] as string;
+    // What a 2.x `agentvault-sync restore` of a 2.x auto-backup stored.
+    await getAdapter().updateConcept(id, { tags: JSON.stringify('["a","b"]') });
+
+    expect((await ok('read_concept', { id }))['tags']).toEqual(['a', 'b']);
+    const listed = (await ok('list_concepts', {}))['concepts'] as Array<{ id: string; tags: unknown }>;
+    expect(listed.find(c => c.id === id)?.tags).toEqual(['a', 'b']);
+    const hits = (await ok('search_concepts', { query: 'legacy tags', k: 1 }))['results'] as Array<{
+      id: string;
+      tags: unknown;
+    }>;
+    expect(hits[0]).toMatchObject({ id, tags: ['a', 'b'] });
+    expect((await ok('save_concept', { id, tags: ['c'] }))['tags']).toEqual(['a', 'b', 'c']);
   });
 });
 

@@ -147,35 +147,58 @@ async function sync(flags: Record<string, string>): Promise<void> {
     | 'push'
     | 'pull'
     | 'bidirectional';
+  if (!['push', 'pull', 'bidirectional'].includes(direction)) {
+    throw new UsageError('sync: --direction must be push, pull or bidirectional');
+  }
 
   console.log(`[agentvault-sync] sync: direction=${direction}`);
 
   const { MemorySyncConnector } =
     await import('../src/integrations/agent-vault/connectors/memory-sync.connector.js');
 
-  const connector = new MemorySyncConnector(config.agentVault);
+  // The connector follows --direction, not the config file's sync.direction
+  // (default push, under which a pull would silently do nothing), and runs no
+  // periodic pull.
+  const connector = new MemorySyncConnector({
+    ...config.agentVault,
+    sync: { ...config.agentVault.sync, direction, pullIntervalMs: 0 },
+  });
 
+  const failures: string[] = [];
   try {
     if (direction === 'pull' || direction === 'bidirectional') {
       console.log('[agentvault-sync] sync: pulling from AgentVault ...');
-      await connector.pullAll();
-      console.log('[agentvault-sync] sync: pull complete');
+      const report = await connector.pullAll();
+      if (report) {
+        console.log(
+          `[agentvault-sync] sync: pulled ${report.imported.length} concepts, skipped ${report.skipped.length}`
+        );
+        for (const s of report.skipped) {
+          console.log(`[agentvault-sync] sync: skipped ${s.key}: ${s.reason}`);
+        }
+      } else {
+        failures.push('the pull from AgentVault failed (see the log)');
+      }
     }
 
     if (direction === 'push' || direction === 'bidirectional') {
       console.log('[agentvault-sync] sync: pushing to AgentVault ...');
-      let pushed = 0;
-      for (const id of await listIds(flags['namespace'])) {
-        await connector.pushConcept(id);
-        pushed++;
-      }
+      const ids = await listIds(flags['namespace']);
+      const counts = { pushed: 0, skipped: 0, failed: 0 };
+      for (const id of ids) counts[await connector.pushConcept(id)]++;
 
-      console.log(`[agentvault-sync] sync: pushed ${pushed} concepts`);
+      console.log(
+        `[agentvault-sync] sync: pushed ${counts.pushed} concepts, ${counts.skipped} had nothing to push, ${counts.failed} failed`
+      );
+      if (counts.failed > 0) {
+        failures.push(`${counts.failed} of ${ids.length} concepts failed to push (see the log)`);
+      }
     }
   } finally {
     connector.stop();
   }
 
+  if (failures.length > 0) throw new Error(`sync: ${failures.join('; ')}`);
   console.log('[agentvault-sync] sync: done');
 }
 

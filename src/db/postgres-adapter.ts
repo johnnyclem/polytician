@@ -13,6 +13,7 @@ import type {
 } from './adapter.js';
 import { VECTOR_DIMENSION, embeddingProblem } from '../types/concept.js';
 import { deserializeEmbedding } from './embedding-codec.js';
+import { repairedTags } from './tags.js';
 
 const { Pool } = pg;
 
@@ -41,6 +42,9 @@ const UPDATABLE_COLUMNS = new Set([
 
 /** metadata key recording that pre-3.0 vectors were labelled with a model. */
 const LEGACY_VECTORS_LABELLED = 'legacy_vectors_labelled';
+
+/** metadata key recording that pre-3.0 `tags` columns were rewritten as JSON arrays. */
+const LEGACY_TAGS_NORMALIZED = 'legacy_tags_normalized';
 
 /** pgvector text literal for a Float32 embedding buffer. */
 function toPgVector(embedding: Buffer): string {
@@ -270,11 +274,13 @@ export class PostgresAdapter implements DatabaseAdapter {
         const entries = this.updateEntries(write.fields);
         const setClause = entries.map(([k], i) => `${k} = $${i + 1}`).join(', ');
         // Under READ COMMITTED a concurrent writer's UPDATE blocks on the row
-        // lock, then re-checks `version` against the committed row, so only
+        // lock, then re-checks `version` (and `namespace`, in case the id was
+        // deleted and re-created elsewhere) against the committed row, so only
         // one writer holding a given expectedVersion can match.
+        const n = entries.length;
         const updated = await client.query(
-          `UPDATE concepts SET ${setClause} WHERE id = $${entries.length + 1} AND version = $${entries.length + 2}`,
-          [...entries.map(([, v]) => v), write.id, write.expectedVersion]
+          `UPDATE concepts SET ${setClause} WHERE id = $${n + 1} AND version = $${n + 2} AND namespace = $${n + 3}`,
+          [...entries.map(([, v]) => v), write.id, write.expectedVersion, write.namespace]
         );
         if (updated.rowCount === 0) return false;
         if (write.fields.embedding === null) {
@@ -434,29 +440,31 @@ export class PostgresAdapter implements DatabaseAdapter {
     k: number,
     filter: VectorFilter
   ): Promise<VectorResult[]> {
-    const params: unknown[] = [toPgVector(queryEmbedding)];
-    const conditions: string[] = [];
-
+    // Filter clauses over `c` and their values; `where(n)` numbers the first placeholder $n.
+    const values: unknown[] = [];
+    const clauses: Array<(n: number) => string> = [];
     if (filter.namespaces !== null) {
       if (filter.namespaces.length === 0) return [];
-      params.push([...filter.namespaces]);
-      conditions.push(`c.namespace = ANY($${params.length}::text[])`);
+      values.push([...filter.namespaces]);
+      clauses.push(n => `c.namespace = ANY($${n}::text[])`);
     }
     if (filter.tags && filter.tags.length > 0) {
-      params.push(JSON.stringify(filter.tags));
-      conditions.push(`c.tags::jsonb @> $${params.length}::jsonb`);
+      values.push(JSON.stringify(filter.tags));
+      clauses.push(n => `c.tags::jsonb @> $${n}::jsonb`);
     }
     if (filter.assertionStatus) {
       if (filter.assertionStatus.length === 0) return [];
-      params.push([...filter.assertionStatus]);
-      conditions.push(`c.assertion_status = ANY($${params.length}::text[])`);
+      values.push([...filter.assertionStatus]);
+      clauses.push(n => `c.assertion_status = ANY($${n}::text[])`);
     }
-    params.push(k);
+    const where = (first: number): string =>
+      clauses.map((clause, i) => clause(first + i)).join(' AND ');
 
-    const filtered = conditions.length > 0;
+    const filtered = clauses.length > 0;
+    const params: unknown[] = [toPgVector(queryEmbedding), ...values, k];
     const sql = `SELECT v.concept_id, v.embedding <=> $1::vector AS distance
        FROM concept_vectors v ${filtered ? 'JOIN concepts c ON c.id = v.concept_id' : ''}
-       ${filtered ? `WHERE ${conditions.join(' AND ')}` : ''}
+       ${filtered ? `WHERE ${where(2)}` : ''}
        ORDER BY v.embedding <=> $1::vector
        LIMIT $${params.length}`;
 
@@ -471,6 +479,19 @@ export class PostgresAdapter implements DatabaseAdapter {
       await client.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
       if (exact) await client.query('SET LOCAL enable_indexscan = off');
       else if (filtered) await client.query('SET LOCAL hnsw.iterative_scan = strict_order');
+      const found = (await client.query(sql, params)).rows;
+      if (exact || !filtered || found.length >= k) return found;
+      // An iterative scan also stops after hnsw.max_scan_tuples (20,000 by
+      // default), so a selective filter behind a crowd of nearer vectors can
+      // come back short. When more rows match than were returned, rank them
+      // with an exact scan instead.
+      const matching = await client.query<{ count: string }>(
+        `SELECT COUNT(*) AS count FROM concept_vectors v JOIN concepts c ON c.id = v.concept_id
+         WHERE ${where(1)}`,
+        values
+      );
+      if (Number(matching.rows[0]?.count ?? 0) <= found.length) return found;
+      await client.query('SET LOCAL enable_indexscan = off');
       return (await client.query(sql, params)).rows;
     });
 
@@ -523,6 +544,36 @@ export class PostgresAdapter implements DatabaseAdapter {
         model,
       ]);
       return labelled.rowCount ?? 0;
+    });
+  }
+
+  async normalizeLegacyTags(): Promise<number> {
+    return this.withTransaction(async client => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_KEY]);
+      const done = await client.query('SELECT 1 FROM metadata WHERE key = $1', [
+        LEGACY_TAGS_NORMALIZED,
+      ]);
+      if ((done.rowCount ?? 0) > 0) return 0;
+      // Every 2.x shape that needs rewriting (NULL, a JSON string) does not
+      // start with '['; repairedTags decides for each candidate.
+      const candidates = await client.query<{ id: string; tags: string | null }>(
+        `SELECT id, tags FROM concepts WHERE tags IS NULL OR tags !~ '^\\s*\\['`
+      );
+      let fixed = 0;
+      for (const row of candidates.rows) {
+        const tags = repairedTags(row.tags);
+        if (tags === null) continue;
+        const updated = await client.query('UPDATE concepts SET tags = $1 WHERE id = $2', [
+          tags,
+          row.id,
+        ]);
+        fixed += updated.rowCount ?? 0;
+      }
+      await client.query('INSERT INTO metadata (key, value) VALUES ($1, $2)', [
+        LEGACY_TAGS_NORMALIZED,
+        String(fixed),
+      ]);
+      return fixed;
     });
   }
 

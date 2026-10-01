@@ -187,19 +187,35 @@ describe('backup format v1 (JSONL)', () => {
 
     const header = encode([]).toString('utf-8').split('\n')[0]!;
     const badRecord = Buffer.from(
-      `${header}\n${JSON.stringify({ ...record(), namespace: `${SECRET} !` })}\n`
+      `${header}\n${JSON.stringify({ ...record(), tags: `${SECRET} !` })}\n`
     );
     const invalid = messageOf(badRecord);
-    expect(invalid).toMatch(/line 2: field 'namespace' is invalid/);
+    expect(invalid).toMatch(/line 2: field 'tags' is invalid/);
     expect(invalid).not.toContain('sk-live');
   });
 
-  it('rejects non-UUID ids and unknown fields', () => {
+  it('rejects ids that are not strings, a missing thoughtform and unknown fields', () => {
     const header = encode([]).toString('utf-8').split('\n')[0]!;
-    const withId = Buffer.from(`${header}\n${JSON.stringify({ ...record(), id: 'x' })}\n`);
+    const withId = Buffer.from(`${header}\n${JSON.stringify({ ...record(), id: 7 })}\n`);
     expect(() => decodeBackup(withId, () => null)).toThrow(/field 'id' is invalid/);
+    const { thoughtform: _omitted, ...noThoughtform } = record();
+    const missing = Buffer.from(`${header}\n${JSON.stringify(noThoughtform)}\n`);
+    expect(() => decodeBackup(missing, () => null)).toThrow(/field 'thoughtform' is invalid/);
     const extra = Buffer.from(`${header}\n${JSON.stringify({ ...record(), extra: 1 })}\n`);
     expect(() => decodeBackup(extra, () => null)).toThrow(BackupFormatError);
+  });
+
+  it('round-trips content 2.x stored and new writes refuse (POLY3-R01)', () => {
+    const legacy = {
+      ...record(),
+      id: 'notes/2024-q3',
+      namespace: 'my notes',
+      tags: [...Array.from({ length: 70 }, (_, i) => `t${i}`), 'x'.repeat(200), ''],
+      markdown: 'm'.repeat(1_000_001),
+      thoughtform: { summary: 'any JSON', entities: ['x'] },
+    };
+    const { records } = decodeBackup(encode([legacy]), () => null);
+    expect(records).toEqual([legacy]);
   });
 
   it('refuses a newer format version with an upgrade hint', () => {

@@ -1,6 +1,8 @@
 /**
- * Input size caps enforced at every write boundary (MCP tools and ConceptService).
- * They bound memory per request; they are not storage quotas.
+ * Input size caps enforced on every write of new content (MCP tools and
+ * ConceptService saves). They bound memory per request; they are not storage
+ * quotas. A backup restore writes back what a store held (StoredConceptSchema),
+ * which for a store migrated from 2.x can exceed them.
  */
 export const LIMITS = {
   /** Characters of markdown per concept. */

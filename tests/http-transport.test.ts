@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { request } from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -33,6 +35,8 @@ import {
 import { getConfig, resetConfig } from '../src/config.js';
 
 const TOKEN = 't'.repeat(43);
+
+const execFileAsync = promisify(execFile);
 
 /** Raw request, so tests can send Host and Origin headers that fetch() would not let them set. */
 function raw(
@@ -152,6 +156,68 @@ describe('Streamable HTTP transport', () => {
     });
     expect(allowed.status).toBe(200);
   });
+
+  it('answers CORS preflights from allowed origins, so browsers can call /mcp (POLY3-R09)', async () => {
+    // A browser sends this before a POST with Authorization; it carries no token.
+    const preflight = (origin: string) =>
+      raw(`${running.url}/mcp`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'authorization, content-type, mcp-protocol-version',
+        },
+      });
+    const ok = await preflight('https://app.example');
+    expect(ok.status).toBe(204);
+    expect(ok.headers['access-control-allow-origin']).toBe('https://app.example');
+    expect(String(ok.headers['access-control-allow-methods'])).toContain('POST');
+    const allowedHeaders = String(ok.headers['access-control-allow-headers']).toLowerCase();
+    for (const h of ['authorization', 'content-type', 'mcp-protocol-version']) {
+      expect(allowedHeaders).toContain(h);
+    }
+    expect(String(ok.headers['vary'])).toMatch(/origin/i);
+
+    const evil = await preflight('https://evil.example');
+    expect(evil.status).toBe(403);
+    expect(evil.headers['access-control-allow-origin']).toBeUndefined();
+
+    // The actual request still needs the token, and its response names the origin.
+    const call = await raw(`${running.url}/mcp`, {
+      method: 'POST',
+      headers: { ...MCP_HEADERS, Authorization: `Bearer ${TOKEN}`, Origin: 'https://app.example' },
+      body: INITIALIZE,
+    });
+    expect(call.status).toBe(200);
+    expect(call.headers['access-control-allow-origin']).toBe('https://app.example');
+    const unauthenticated = await raw(`${running.url}/mcp`, {
+      method: 'POST',
+      headers: { ...MCP_HEADERS, Origin: 'https://app.example' },
+      body: INITIALIZE,
+    });
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.headers['access-control-allow-origin']).toBe('https://app.example');
+    // Without an Origin there is no CORS to answer.
+    const plain = await raw(`${running.url}/mcp`, {
+      method: 'POST',
+      headers: { ...MCP_HEADERS, Authorization: `Bearer ${TOKEN}` },
+      body: INITIALIZE,
+    });
+    expect(plain.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('passes scripts/smoke-http.mjs on every run against one server, leaving nothing behind (POLY-R6)', async () => {
+    const script = join(import.meta.dirname, '..', 'scripts', 'smoke-http.mjs');
+    for (let run = 0; run < 4; run++) {
+      const { stdout } = await execFileAsync(process.execPath, [script, running.url, '--embed'], {
+        env: { ...process.env, POLYTICIAN_HTTP_TOKEN: TOKEN },
+        timeout: 30_000,
+      });
+      expect(stdout).toContain('smoke: ok');
+    }
+    const { getAdapter } = await import('../src/db/client.js');
+    expect((await getAdapter().listConcepts({ limit: 10, offset: 0 })).total).toBe(0);
+  }, 60_000);
 
   it('serves /health and /health/live on the same port without a token', async () => {
     const ready = await raw(`${running.url}/health`, {});

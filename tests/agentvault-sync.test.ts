@@ -174,4 +174,27 @@ describe('agentvault-sync sync', () => {
   it('should fail when AgentVault is not configured', () => {
     expect(runFailing('sync')).toContain('AgentVault integration is not configured');
   });
+
+  // Nothing listens on port 9, so every request to AgentVault fails.
+  const unreachable = { POLYTICIAN_AV_API_URL: 'http://127.0.0.1:9' };
+
+  it('exits non-zero and counts nothing as pushed when every push fails (POLY-R5)', () => {
+    seed();
+    let stdout = '';
+    let stderr = '';
+    try {
+      run('sync --direction push', unreachable);
+    } catch (err) {
+      ({ stdout, stderr } = err as { stdout: string; stderr: string });
+    }
+    expect(stderr).toMatch(/3 of 3 concepts failed to push/);
+    expect(stdout).toContain('pushed 0 concepts');
+    expect(stdout).not.toContain('sync: done');
+  });
+
+  it('exits non-zero when the pull fails, whatever direction the config file sets (POLY-R5)', () => {
+    // The config default direction is push, under which pullAll did nothing.
+    const stderr = runFailing('sync --direction pull', unreachable);
+    expect(stderr).toMatch(/pull from AgentVault failed/);
+  });
 });

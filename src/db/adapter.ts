@@ -12,7 +12,8 @@ export interface ConceptRow {
   version: number;
   created_at: number;
   updated_at: number;
-  tags: string; // JSON-encoded string[]
+  /** JSON-encoded string[]; read it with parseTags (rows from 2.x may hold other shapes). */
+  tags: string;
   markdown: string | null;
   thoughtform: string | null;
   embedding: Buffer | null;
@@ -195,6 +196,13 @@ export interface DatabaseAdapter {
    * Runs once per database; returns the number of vectors labelled.
    */
   labelLegacyVectors(model: string): number | Promise<number>;
+
+  /**
+   * Rewrite `tags` columns that are not a JSON array of strings (2.x could
+   * store the array JSON-encoded twice, or NULL) as the array they mean
+   * (see parseTags). Runs once per database; returns the number of rows fixed.
+   */
+  normalizeLegacyTags(): number | Promise<number>;
 
   // --- Concept metadata (for search result enrichment) ---
 

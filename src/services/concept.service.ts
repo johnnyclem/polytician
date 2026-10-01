@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getAdapter } from '../db/client.js';
-import type { ConceptRow, ConceptUpdateFields, ConceptWrite } from '../db/adapter.js';
+import type { ConceptRow, ConceptUpdateFields, ConceptWrite, VectorResult } from '../db/adapter.js';
 import {
   AssertionStatusSchema,
   embeddingProblem,
@@ -8,6 +8,7 @@ import {
   ProvenanceSchema,
   RepresentationTypeSchema,
   SourceSchema,
+  StoredConceptSchema,
   type AssertionStatus,
   type Concept,
   type ConceptRepresentations,
@@ -33,6 +34,7 @@ import {
 } from '../errors/index.js';
 import { conceptEventBus } from '../events/concept-events.js';
 import { serializeEmbedding, deserializeEmbedding } from '../db/embedding-codec.js';
+import { parseTags } from '../db/tags.js';
 import { embeddingService } from './embedding.service.js';
 
 /**
@@ -80,7 +82,11 @@ export interface SaveParams {
   ledgerRef?: string | null;
 }
 
-/** A concept as a backup holds it: every stored field, representations as values. */
+/**
+ * A concept as a backup holds it: every stored field, representations as
+ * values. Checked against StoredConceptSchema, not the rules for new writes,
+ * so content a store kept from 2.x is restored as it was.
+ */
 export interface RestoreRecord {
   id: string;
   namespace: string;
@@ -89,7 +95,8 @@ export interface RestoreRecord {
   updatedAt: number;
   tags: string[];
   markdown: string | null;
-  thoughtform: StoredThoughtForm | null;
+  /** A ThoughtForm, or any JSON value 2.x stored as one; null for none. */
+  thoughtform: unknown;
   embedding: number[] | null;
   provenance: ProvenanceMap;
   assertionStatus: AssertionStatus | null;
@@ -183,7 +190,7 @@ function rowToConcept(row: ConceptRow): Concept {
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    tags: JSON.parse(row.tags) as string[],
+    tags: parseTags(row.tags),
     markdown: row.markdown,
     // Stored as validated on write; rows from 2.x may hold free-form JSON,
     // which conversions re-validate before use.
@@ -199,6 +206,21 @@ function hasRepresentation(row: ConceptRow, rep: RepresentationType): boolean {
   if (rep === 'markdown') return row.markdown !== null;
   if (rep === 'thoughtform') return row.thoughtform !== null;
   return row.embedding !== null;
+}
+
+/** Throws ValidationError naming the first field of a restore record that a store cannot hold. */
+function validateRestoreRecord(record: RestoreRecord, label: string): void {
+  const parsed = StoredConceptSchema.safeParse(record);
+  if (!parsed.success) {
+    const field = parsed.error.issues[0]?.path[0];
+    throw new ValidationError(
+      `${label}: ${typeof field === 'string' ? `field '${field}' is invalid` : 'unexpected structure'}`
+    );
+  }
+  if (record.embedding !== null) {
+    const problem = embeddingProblem(record.embedding);
+    if (problem) throw new ValidationError(`${label}: ${problem}`);
+  }
 }
 
 /** Throws ValidationError describing the first invalid field of a save entry. */
@@ -391,33 +413,18 @@ export class ConceptService {
   /**
    * Write concepts from a backup as they were saved: same ids, namespaces,
    * timestamps, tags, representations, vectors and provenance. Every record
-   * is validated before anything is written, then all writes are applied in
-   * one transaction. A concept that lives in another namespace is never
-   * touched; other existing concepts follow `onConflict` (default 'newer').
+   * is validated (StoredConceptSchema and the embedding rules) before
+   * anything is written, then all writes are applied in one transaction. The
+   * caps and schemas for new writes do not apply: content a store kept from
+   * 2.x is restored as it was. A concept that lives in another namespace is
+   * never touched; other existing concepts follow `onConflict` (default 'newer').
    */
   async restore(
     records: RestoreRecord[],
     options: { onConflict?: RestoreConflictPolicy } = {}
   ): Promise<RestoreOutcome> {
     const onConflict = options.onConflict ?? 'newer';
-    records.forEach((r, i) => {
-      const label = `backup record ${i + 1}`;
-      validateEntry(
-        {
-          namespace: r.namespace,
-          markdown: r.markdown ?? undefined,
-          thoughtform: r.thoughtform ?? undefined,
-          embedding: r.embedding ?? undefined,
-          tags: r.tags,
-          assertionStatus: r.assertionStatus,
-          ledgerRef: r.ledgerRef,
-        },
-        label
-      );
-      if (r.markdown === null && r.thoughtform === null && r.embedding === null) {
-        throw new ValidationError(`${label}: a concept needs at least one representation`);
-      }
-    });
+    records.forEach((r, i) => validateRestoreRecord(r, `backup record ${i + 1}`));
     if (new Set(records.map(r => r.id)).size !== records.length) {
       throw new ValidationError('a backup cannot contain the same concept id twice');
     }
@@ -648,9 +655,7 @@ export class ConceptService {
     }
 
     const version = existing.version + 1;
-    const tags = JSON.stringify(
-      mergeTags(JSON.parse(existing.tags) as string[], entry.tags, label)
-    );
+    const tags = JSON.stringify(mergeTags(parseTags(existing.tags), entry.tags, label));
     const provenanceJson = JSON.stringify(provenance);
     const fields: ConceptUpdateFields = {
       version,
@@ -777,7 +782,7 @@ export class ConceptService {
         version: r.version,
         createdAt: r.created_at,
         updatedAt: r.updated_at,
-        tags: JSON.parse(r.tags) as string[],
+        tags: parseTags(r.tags),
         representations: {
           vector: r.has_vec === 1,
           markdown: r.has_md === 1,
@@ -829,23 +834,28 @@ export class ConceptService {
 
     // Fetch one extra row to see whether the k-th score is tied with rows
     // beyond it; if so, widen until the tied group is complete so the id
-    // tie-break decides which of them make the cut.
-    let fetch = Math.min(k + 1, MAX_SEARCH_FETCH);
-    let rows = await adapter.vectorSearch(queryBuf, fetch, filter);
-    const boundaryTied = (): boolean =>
-      rows.length === fetch && rows[rows.length - 1]?.distance === rows[k - 1]?.distance;
-    while (fetch < MAX_SEARCH_FETCH && boundaryTied()) {
-      fetch = Math.min(fetch * 2, MAX_SEARCH_FETCH);
-      rows = await adapter.vectorSearch(queryBuf, fetch, filter);
-    }
-
-    const top = [...rows]
-      .sort(
+    // tie-break decides which of them make the cut. sqlite-vec runs the KNN
+    // once per listed namespace and returns up to `fetch` rows from each, so
+    // the test counts the rows at or before the k-th distance: fewer than
+    // `fetch` of them means no single scan was cut off inside the tie.
+    const ranked = (found: VectorResult[]): VectorResult[] =>
+      [...found].sort(
         (a, b) =>
           a.distance - b.distance ||
           (a.concept_id < b.concept_id ? -1 : a.concept_id > b.concept_id ? 1 : 0)
-      )
-      .slice(0, k);
+      );
+    let fetch = Math.min(k + 1, MAX_SEARCH_FETCH);
+    let rows = ranked(await adapter.vectorSearch(queryBuf, fetch, filter));
+    const boundaryTied = (): boolean => {
+      const kth = rows[k - 1]?.distance;
+      return kth !== undefined && rows.filter(r => r.distance <= kth).length >= fetch;
+    };
+    while (fetch < MAX_SEARCH_FETCH && boundaryTied()) {
+      fetch = Math.min(fetch * 2, MAX_SEARCH_FETCH);
+      rows = ranked(await adapter.vectorSearch(queryBuf, fetch, filter));
+    }
+
+    const top = rows.slice(0, k);
     if (top.length === 0) return [];
 
     const meta = new Map(
@@ -860,7 +870,7 @@ export class ConceptService {
         id: r.concept_id,
         namespace: cr.namespace,
         score: Math.min(1, Math.max(0, 1 - r.distance / 2)),
-        tags: JSON.parse(cr.tags) as string[],
+        tags: parseTags(cr.tags),
         representations: {
           vector: cr.has_vec === 1,
           markdown: cr.has_md === 1,

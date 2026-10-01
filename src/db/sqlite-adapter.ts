@@ -16,6 +16,7 @@ import type {
 } from './adapter.js';
 import { VECTOR_DIMENSION, embeddingProblem } from '../types/concept.js';
 import { deserializeEmbedding } from './embedding-codec.js';
+import { repairedTags } from './tags.js';
 
 /** vec0 rejects larger k values. */
 const MAX_KNN_K = 4096;
@@ -36,6 +37,9 @@ const UPDATABLE_COLUMNS = new Set([
 
 /** metadata key recording that pre-3.0 vectors were labelled with a model. */
 const LEGACY_VECTORS_LABELLED = 'legacy_vectors_labelled';
+
+/** metadata key recording that pre-3.0 `tags` columns were rewritten as JSON arrays. */
+const LEGACY_TAGS_NORMALIZED = 'legacy_tags_normalized';
 
 /** Rows whose vector is not recorded as made by the bound model. */
 const FOREIGN_VECTOR = '(embedding_model IS NULL OR embedding_model <> ?)';
@@ -239,8 +243,10 @@ export class SqliteAdapter implements DatabaseAdapter {
         const entries = this.updateEntries(write.fields);
         const setClause = entries.map(([k]) => `${k} = ?`).join(', ');
         const updated = this.db
-          .prepare(`UPDATE concepts SET ${setClause} WHERE id = ? AND version = ?`)
-          .run(...entries.map(([, v]) => v), write.id, write.expectedVersion);
+          .prepare(
+            `UPDATE concepts SET ${setClause} WHERE id = ? AND version = ? AND namespace = ?`
+          )
+          .run(...entries.map(([, v]) => v), write.id, write.expectedVersion, write.namespace);
         if (updated.changes === 0) return false;
         if (write.fields.embedding === null) this.deleteVector(write.id);
         else if (write.fields.embedding) {
@@ -437,6 +443,30 @@ export class SqliteAdapter implements DatabaseAdapter {
         .run(model).changes;
       this.setMetadata(LEGACY_VECTORS_LABELLED, model);
       return labelled;
+    })();
+  }
+
+  normalizeLegacyTags(): number {
+    return this.db.transaction((): number => {
+      if (this.getMetadata(LEGACY_TAGS_NORMALIZED) !== null) return 0;
+      // CASE keeps json_type and json_each away from malformed JSON, which they reject.
+      const candidates = this.db
+        .prepare(
+          `SELECT id, tags FROM concepts WHERE CASE
+             WHEN tags IS NULL OR json_valid(tags) = 0 THEN 1
+             WHEN json_type(tags) <> 'array' THEN 1
+             ELSE EXISTS (SELECT 1 FROM json_each(concepts.tags) WHERE json_each.type <> 'text')
+           END`
+        )
+        .all() as Array<{ id: string; tags: string | null }>;
+      const update = this.db.prepare('UPDATE concepts SET tags = ? WHERE id = ?');
+      let fixed = 0;
+      for (const row of candidates) {
+        const tags = repairedTags(row.tags);
+        if (tags !== null) fixed += update.run(tags, row.id).changes;
+      }
+      this.setMetadata(LEGACY_TAGS_NORMALIZED, String(fixed));
+      return fixed;
     })();
   }
 

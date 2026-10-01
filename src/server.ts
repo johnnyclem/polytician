@@ -466,7 +466,7 @@ export async function createServer(): Promise<McpServer> {
 
   // --- Backups ---
 
-  registerBackupTools(server);
+  registerBackupTools(server, { writesLeaveBox });
 
   // Register AgentVault tools if integration is configured
   if (av) {

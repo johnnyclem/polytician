@@ -6,6 +6,7 @@
  */
 
 import type { DatabaseAdapter, ConceptRow } from '../db/adapter.js';
+import { parseTags } from '../db/tags.js';
 import type { ThoughtFormV1 } from '../schemas/thoughtform.js';
 import type { ProvenanceMap } from '../types/concept.js';
 
@@ -114,7 +115,7 @@ export async function upsertThoughtforms(
  * Extract tags from a ThoughtForm, merging with any existing tags.
  */
 function extractTags(tf: ThoughtFormV1, existingTagsJson: string): string[] {
-  const existing: string[] = JSON.parse(existingTagsJson) as string[];
+  const existing = parseTags(existingTagsJson);
   const entityTypes = tf.entities.map(e => e.type);
   return [...new Set([...existing, ...entityTypes])];
 }
