@@ -14,6 +14,7 @@ import {
   type ThoughtFormView,
 } from '../types/thoughtform.js';
 import type { LLMProvider, ThoughtFormEntities } from '../providers/llm.interface.js';
+import { JevJudge } from '../providers/jev-judge.js';
 import type { NLPPipeline, NLPPipelineOptions } from '../providers/nlp-pipeline.interface.js';
 import { NullProvider } from '../providers/null.provider.js';
 import { ConversionError, OverwriteRefusedError } from '../errors/index.js';
@@ -48,6 +49,7 @@ type Derivation =
 export class ConversionService {
   private llmProvider: LLMProvider = new NullProvider();
   private nlpPipeline: NLPPipeline | null = null;
+  private jev: JevJudge | null = null;
 
   setLLMProvider(provider: LLMProvider): void {
     this.llmProvider = provider;
@@ -63,6 +65,11 @@ export class ConversionService {
 
   getNLPPipelineName(): string | null {
     return this.nlpPipeline?.name ?? null;
+  }
+
+  /** Optional judge for the 0.55 entity guess and equal-score neighbor ties. */
+  setJev(judge: JevJudge | null): void {
+    this.jev = judge;
   }
 
   /**
@@ -229,6 +236,7 @@ export class ConversionService {
         minConfidence: nlp.minConfidence,
       };
       extracted = await this.nlpPipeline.extractEntities(markdown, pipelineOptions);
+      extracted = await this.judgeLowEntities(markdown, extracted);
       provenance = { origin: 'derived', derivedFrom: 'markdown', model: this.nlpPipeline.name };
     } else {
       // Fall back to LLM-based entity extraction
@@ -311,7 +319,60 @@ export class ConversionService {
       const text = neighbor.markdown ?? (tf?.success ? thoughtFormText(tf.data) : null);
       if (text) result.push({ id: n.id, text, score: n.score });
     }
-    return result;
+    return this.judgeTiedNeighbors(result);
+  }
+
+  /**
+   * The pipeline's 0.55 single-cap guess is typed ENTITY by default. When a
+   * judge is set, those spans are reclassified against the types the pipeline
+   * already emits. A decline drops the span instead of keeping the guess.
+   */
+  private async judgeLowEntities(
+    markdown: string,
+    extracted: ThoughtFormEntities
+  ): Promise<ThoughtFormEntities> {
+    if (!this.jev) return extracted;
+    const types = ['PERSON', 'ORGANIZATION', 'LOCATION', 'CONCEPT', 'ENTITY'];
+    const entities = [];
+    for (const entity of extracted.entities) {
+      if (!JevJudge.isLowEntity(entity.confidence)) {
+        entities.push(entity);
+        continue;
+      }
+      const verdict = await this.jev.choose(markdown, `What type is the span "${entity.text}"?`, types.map(id => ({
+        id,
+        description: id === 'ENTITY' ? 'Unspecified capitalized span' : id,
+      })));
+      if (!verdict.id) continue;
+      entities.push({ ...entity, type: verdict.id, confidence: verdict.probability });
+    }
+    const kept = new Set(entities.map(e => e.id));
+    return {
+      entities,
+      relationships: extracted.relationships.filter(r => kept.has(r.subjectId) && kept.has(r.objectId)),
+      contextGraph: extracted.contextGraph,
+    };
+  }
+
+  /**
+   * concept search breaks an equal score by concept id. When the first two
+   * neighbors tie and a judge is set, Jev picks one of those ids. A decline
+   * drops the tied group and keeps the stricter winners.
+   */
+  private async judgeTiedNeighbors(
+    neighbors: Array<{ id: string; text: string; score: number }>
+  ): Promise<Array<{ id: string; text: string; score: number }>> {
+    const top = neighbors[0];
+    if (!this.jev || !top || neighbors.length < 2) return neighbors;
+    const tied = neighbors.filter(n => n.score === top.score);
+    if (tied.length < 2) return neighbors;
+    const verdict = await this.jev.choose(
+      tied.map(n => `${n.id}: ${n.text}`).join('\n'),
+      'Which of these tied neighbors is the same thought?',
+      tied.map(n => ({ id: n.id, description: n.text.slice(0, 240) }))
+    );
+    if (!verdict.id) return neighbors.filter(n => n.score !== top.score);
+    return [tied.find(n => n.id === verdict.id)!, ...neighbors.filter(n => n.score !== top.score)];
   }
 
   private buildThoughtForm(
